@@ -138,8 +138,11 @@ def read_model_stats() -> list[dict]:
 def count_events(lines: list[str]) -> dict:
     """Count events by emoji from log lines."""
     counts = {
-        "tools": 0, "reads": 0, "searches": 0, "skills": 0,
-        "mcp": 0, "agents": 0, "tasks": 0, "sessions": 0, "compacts": 0,
+        "tools": 0, "reads": 0, "searches": 0, "fetches": 0,
+        "mcp": 0, "agents": 0, "subagents": 0, "landed": 0, "finished": 0,
+        "plans": 0, "tasks": 0, "sessions": 0, "ended": 0,
+        "input": 0, "permission": 0, "questions": 0,
+        "completed": 0, "compacts": 0,
     }
     for line in lines:
         clean = strip_ansi(line)
@@ -149,16 +152,34 @@ def count_events(lines: list[str]) -> dict:
             counts["reads"] += 1
         if "🔍" in clean:
             counts["searches"] += 1
-        if "⚡" in clean:
-            counts["skills"] += 1
+        if "🌐" in clean:
+            counts["fetches"] += 1
         if "🔌" in clean:
             counts["mcp"] += 1
         if "🚀" in clean:
             counts["agents"] += 1
+        if "🤖" in clean:
+            counts["subagents"] += 1
+        if "🛬" in clean:
+            counts["landed"] += 1
+        if "🏁" in clean:
+            counts["finished"] += 1
+        if "📐" in clean:
+            counts["plans"] += 1
         if "📋 Task created" in clean:
             counts["tasks"] += 1
         if "🟢" in clean:
             counts["sessions"] += 1
+        if "🔴" in clean:
+            counts["ended"] += 1
+        if "👋" in clean:
+            counts["input"] += 1
+        if "🔐" in clean:
+            counts["permission"] += 1
+        if "❓" in clean:
+            counts["questions"] += 1
+        if "✅" in clean:
+            counts["completed"] += 1
         if "⚠️" in clean:
             counts["compacts"] += 1
     return counts
@@ -750,7 +771,7 @@ class ClaudeDashboardApp(App):
     }
 
     #log-pane {
-        width: 3fr;
+        width: 4fr;
     }
 
     #event-log {
@@ -777,15 +798,8 @@ class ClaudeDashboardApp(App):
 
     #sidebar {
         width: 1fr;
-        min-width: 36;
-        max-width: 48;
-    }
-
-    #sidebar-context {
-        height: auto;
-        padding: 0 1;
-        color: #d7af5f;
-        text-align: right;
+        min-width: 32;
+        max-width: 42;
     }
 
     #stats-panel {
@@ -824,9 +838,9 @@ class ClaudeDashboardApp(App):
 
     #filter-indicators {
         dock: bottom;
-        height: 1;
+        height: 2;
         display: none;
-        padding: 0 1;
+        padding: 0 1 1 1;
         background: transparent;
         color: $text;
     }
@@ -845,6 +859,13 @@ class ClaudeDashboardApp(App):
         height: auto;
         padding: 0 1;
         margin: 0 0 1 0;
+        border: solid #5fafff;
+    }
+
+    #stats-daily-tokens {
+        height: 1fr;
+        padding: 0 1;
+        overflow-y: auto;
         border: solid #5fafff;
     }
 
@@ -885,6 +906,7 @@ class ClaudeDashboardApp(App):
         Binding("e", "cycle_event_type", "Event", show=True),
         Binding("c", "toggle_compact", "Compact", show=True),
         Binding("t", "cycle_time_range", "Time", show=True),
+        Binding("n", "next_page", "Next Page", show=True),
         Binding("escape", "clear_filters", "Clear", show=True),
         Binding("j", "scroll_down", "Down", show=False),
         Binding("k", "scroll_up", "Up", show=False),
@@ -913,7 +935,8 @@ class ClaudeDashboardApp(App):
         self._active_tab: str = "tab-live"
         self._spinner_idx: int = 0
         self._stats_time_range: str = "Today"
-        self._time_range_options: list[str] = ["Today", "All"]
+        self._time_range_options: list[str] = ["Today", "7d", "All"]
+        self._daily_tokens_page: int = 0
 
     def compose(self) -> ComposeResult:
         yield Static("", id="header-bar")
@@ -922,7 +945,7 @@ class ClaudeDashboardApp(App):
             with TabPane("1.Live", id="tab-live"):
                 with Horizontal(id="main-content"):
                     with Vertical(id="log-pane"):
-                        yield RichLog(id="event-log", highlight=False, markup=False, wrap=True, max_lines=5000)
+                        yield RichLog(id="event-log", highlight=False, markup=False, wrap=False, max_lines=5000)
                         yield Input(placeholder="Filter logs (fuzzy)...", id="filter-input")
                     with Vertical(id="sidebar"):
                         yield Static("", id="stats-panel")
@@ -930,12 +953,12 @@ class ClaudeDashboardApp(App):
                         with Vertical(id="instances-panel"):
                             yield Static("", id="instances-panel-header")
                             yield Static("", id="instances-panel-body")
-                        yield Static("", id="sidebar-context")
                 yield Static("", id="filter-indicators")
             # Tab 2: Stats
             with TabPane("2.Stats", id="tab-stats"):
                 with Vertical(id="stats-view"):
                     yield Static("", id="stats-summary")
+                    yield Static("", id="stats-daily-tokens")
             # Tab 3: Instances
             with TabPane("3.Instances", id="tab-instances"):
                 with Vertical(id="instances-view"):
@@ -1023,7 +1046,7 @@ class ClaudeDashboardApp(App):
             self._rebuild_log()
 
     def _has_active_filters(self) -> bool:
-        return bool(self.text_filter or self.project_filter or self.event_type_filter)
+        return bool(self.text_filter or self.project_filter or self.event_type_filter or self._stats_time_range != "All")
 
     # ─── Log rendering ────────────────────────────────────────────────────
 
@@ -1032,7 +1055,7 @@ class ClaudeDashboardApp(App):
         log_widget = self.query_one("#event-log", RichLog)
         log_widget.clear()
 
-        entries = self.tailer.all_entries
+        entries = self._filter_entries_by_time(self.tailer.all_entries)
         filtered = [
             e for e in entries
             if e.matches_filter(self.text_filter, self.project_filter, self.event_type_filter)
@@ -1087,7 +1110,12 @@ class ClaudeDashboardApp(App):
                 text.append(" │ ", style="dim")
                 text.append(entry.branch or "-", style="dim")
             text.append(" │ ", style="dim")
-            text.append(entry.event, style=entry.style)
+            display_event = entry.event.replace("📋 Task created", "📋 Todo created").replace("📋 Task completed", "📋 Todo completed")
+            # Shorten model IDs in session started lines: [claude-opus-4-6] → [Opus 4.6]
+            m = re.search(r"\[(claude-[^\]]+)\]", display_event)
+            if m:
+                display_event = display_event.replace(m.group(0), f"[{format_model_name(m.group(1))}]")
+            text.append(display_event, style=entry.style)
             log_widget.write(text)
 
     def _compact_entries(self, entries: list[LogEntry]) -> list:
@@ -1121,19 +1149,25 @@ class ClaudeDashboardApp(App):
     # ─── Sidebar ──────────────────────────────────────────────────────────
 
     def _filter_entries_by_time(self, entries: list[LogEntry]) -> list[LogEntry]:
-        """Filter log entries by the current time range selection (Today or All)."""
+        """Filter log entries by the current time range selection (Today, 7d, or All)."""
         rng = self._stats_time_range
         if rng == "All":
             return entries
 
-        today_mmdd = datetime.now().strftime("%m/%d")
+        now = datetime.now()
+        if rng == "Today":
+            valid_dates = {now.strftime("%m/%d")}
+        elif rng == "7d":
+            valid_dates = {(now - timedelta(days=i)).strftime("%m/%d") for i in range(7)}
+        else:
+            return entries
+
         filtered = []
         for entry in entries:
             ts = entry.timestamp.strip()
             m = re.match(r"(\d{2}/\d{2})", ts)
-            if m and m.group(1) == today_mmdd:
+            if m and m.group(1) in valid_dates:
                 filtered.append(entry)
-            # Entries without date prefix are excluded from "Today"
         return filtered
 
     def _update_sidebar(self) -> None:
@@ -1141,38 +1175,9 @@ class ClaudeDashboardApp(App):
         self._spinner_idx = (self._spinner_idx + 1) % len(BRAILLE_SPINNER)
         filtered_entries = self._filter_entries_by_time(self.tailer.all_entries)
         raw_lines = [e.raw for e in filtered_entries]
-        self._update_sidebar_context()
         self._update_stats_panel(raw_lines)
         self._update_token_panel()
         self._update_instances_panel()
-
-    def _update_sidebar_context(self) -> None:
-        """Show time context matching the current time range filter."""
-        rng = self._stats_time_range
-        if rng == "All":
-            first_date = self._stats_cache.get("firstSessionDate", "")
-            if first_date:
-                try:
-                    dt = datetime.fromisoformat(first_date.replace("Z", "+00:00"))
-                    since = dt.strftime("%b %d, %Y")
-                except Exception:
-                    since = first_date[:10]
-                label = f"Stats: All | Since {since}"
-            else:
-                label = "Stats: All"
-        elif rng == "Today":
-            today_mmdd = datetime.now().strftime("%m/%d")
-            first_time = ""
-            for entry in self.tailer.all_entries:
-                if "🟢" in entry.event and "Session started" in entry.event:
-                    if entry.timestamp.strip().startswith(today_mmdd):
-                        first_time = entry.timestamp
-                        break
-            label = f"Stats: Today | Since {first_time}" if first_time else "Stats: Today"
-        else:
-            label = f"Stats: {rng}"
-        label += "  (t)"
-        self.query_one("#sidebar-context", Static).update(label)
 
     def _update_stats_panel(self, lines: list[str]) -> None:
         counts = count_events(lines)
@@ -1184,58 +1189,116 @@ class ClaudeDashboardApp(App):
         table.add_column(style="bold", width=12)
         table.add_column(justify="right")
 
-        table.add_row("🔧 Tools", str(counts["tools"]))
-        table.add_row("📖 Reads", str(counts["reads"]))
-        table.add_row("🔍 Searches", str(counts["searches"]))
-        table.add_row("⚡ Skills", str(counts["skills"]))
-        table.add_row("🔌 MCP", str(counts["mcp"]))
-        table.add_row("🤖 Agents", str(counts["agents"]))
-        table.add_row("📋 Tasks", str(counts["tasks"]))
-        table.add_row("🟢 Sessions", str(counts["sessions"]))
-        table.add_row("⚠️  Compacts", str(counts["compacts"]))
+        table.add_row("🔧 Tool use", str(counts["tools"]))
+        table.add_row("📖 Read", str(counts["reads"]))
+        table.add_row("🔍 Search", str(counts["searches"]))
+        table.add_row("🌐 Fetch", str(counts["fetches"]))
+        table.add_row("🔌 MCP call", str(counts["mcp"]))
+        table.add_row("🚀 Agent spawn", str(counts["agents"]))
+        table.add_row("🤖 Agent task", str(counts["subagents"]))
+        table.add_row("🛬 Agent finished", str(counts["landed"]))
+        table.add_row("🏁 Finished responding", str(counts["finished"]))
+        table.add_row("📐 Plan mode", str(counts["plans"]))
+        table.add_row("📋 Todo created", str(counts["tasks"]))
+        table.add_row("🟢 Session start", str(counts["sessions"]))
+        table.add_row("🔴 Session end", str(counts["ended"]))
+        table.add_row("👋 Wants input", str(counts["input"]))
+        table.add_row("🔐 Need permission", str(counts["permission"]))
+        table.add_row("❓ Ask question", str(counts["questions"]))
+        table.add_row("✅ Todo complete", str(counts["completed"]))
+        table.add_row("⚠️  Compact", str(counts["compacts"]))
         table.add_row("", "")
         total = sum(counts.values())
         table.add_row("[bold]Total[/]", f"[bold]{total}[/]")
 
         self.query_one("#stats-panel", Static).update(table)
 
+    def _get_daily_token_dates(self) -> set[str] | None:
+        """Return the set of YYYY-MM-DD dates for the current time range, or None for All."""
+        rng = self._stats_time_range
+        if rng == "All":
+            return None
+        now = datetime.now()
+        if rng == "Today":
+            return {now.strftime("%Y-%m-%d")}
+        elif rng == "7d":
+            return {(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)}
+        return None
+
     def _update_token_panel(self) -> None:
-        """Token panel — always shows all-time data (only reliable source)."""
+        """Token panel — shows per-model tokens for the selected time range."""
+        rng = self._stats_time_range
+        title_label = {"Today": "Today", "7d": "7 Days", "All": "All Time"}.get(rng, rng)
         table = Table(
             show_header=False, show_edge=False, box=None, padding=(0, 1),
-            title="[bold]🪙 Tokens (All Time)[/]", title_style="bold",
+            title=f"[bold]🪙 Tokens ({title_label})[/]", title_style="bold",
             expand=True,
         )
         table.add_column(style="bold", width=16)
         table.add_column(justify="right")
 
-        model_usage = self._stats_cache.get("modelUsage", {})
-        if model_usage:
-            table.add_row("", "")
-            for model_id, usage in sorted(model_usage.items(), key=lambda x: -(
-                x[1].get("inputTokens", 0) + x[1].get("outputTokens", 0)
-                + x[1].get("cacheReadInputTokens", 0) + x[1].get("cacheCreationInputTokens", 0)
-            )):
-                name = format_model_name(model_id)
-                inp = usage.get("inputTokens", 0)
-                out = usage.get("outputTokens", 0)
-                cache_read = usage.get("cacheReadInputTokens", 0)
-                cache_write = usage.get("cacheCreationInputTokens", 0)
-                total = inp + out + cache_read + cache_write
-                if out > 0:
-                    cache_ratio = cache_read / out
-                    table.add_row(f"🧠 {name}", f"{_format_tokens(total)} [dim](cache {cache_ratio:.0f}x)[/]")
-                else:
-                    table.add_row(f"🧠 {name}", _format_tokens(total))
-            grand_total = sum(
-                u.get("inputTokens", 0) + u.get("outputTokens", 0)
-                + u.get("cacheReadInputTokens", 0) + u.get("cacheCreationInputTokens", 0)
-                for u in model_usage.values()
-            )
-            table.add_row("", "")
-            table.add_row("[bold]Total[/]", f"[bold]{_format_tokens(grand_total)}[/]")
+        date_filter = self._get_daily_token_dates()
+
+        if date_filter is None:
+            # All Time — use modelUsage for full breakdown with cache ratios
+            model_usage = self._stats_cache.get("modelUsage", {})
+            if model_usage:
+                table.add_row("", "")
+                for model_id, usage in sorted(model_usage.items(), key=lambda x: -(
+                    x[1].get("inputTokens", 0) + x[1].get("outputTokens", 0)
+                    + x[1].get("cacheReadInputTokens", 0) + x[1].get("cacheCreationInputTokens", 0)
+                )):
+                    name = format_model_name(model_id)
+                    inp = usage.get("inputTokens", 0)
+                    out = usage.get("outputTokens", 0)
+                    cache_read = usage.get("cacheReadInputTokens", 0)
+                    cache_write = usage.get("cacheCreationInputTokens", 0)
+                    total = inp + out + cache_read + cache_write
+                    if out > 0:
+                        cache_ratio = cache_read / out
+                        table.add_row(f"🧠 {name}", f"{_format_tokens(total)} [dim](cache {cache_ratio:.0f}x)[/]")
+                    else:
+                        table.add_row(f"🧠 {name}", _format_tokens(total))
+                grand_total = sum(
+                    u.get("inputTokens", 0) + u.get("outputTokens", 0)
+                    + u.get("cacheReadInputTokens", 0) + u.get("cacheCreationInputTokens", 0)
+                    for u in model_usage.values()
+                )
+                table.add_row("", "")
+                table.add_row("[bold]Total[/]", f"[bold]{_format_tokens(grand_total)}[/]")
+            else:
+                table.add_row("[dim]Waiting...[/]", "")
         else:
-            table.add_row("[dim]Waiting...[/]", "")
+            # Today / 7d — aggregate dailyModelTokens + live model-stats
+            daily_model = self._stats_cache.get("dailyModelTokens", [])
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            last_computed = self._stats_cache.get("lastComputedDate", "")
+
+            # Aggregate cached daily data for the date range
+            model_totals: dict[str, int] = {}
+            for day in daily_model:
+                if day.get("date", "") in date_filter:
+                    for model_id, tokens in day.get("tokensByModel", {}).items():
+                        model_totals[model_id] = model_totals.get(model_id, 0) + tokens
+
+            # If today is in the range and cache is stale, add live model-stats
+            live_models = []
+            if today_str in date_filter and last_computed != today_str:
+                live_models = read_model_stats()
+                for m in live_models:
+                    mid = m["model"]
+                    model_totals[mid] = model_totals.get(mid, 0) + m["total"]
+
+            if model_totals:
+                table.add_row("", "")
+                for model_id, total in sorted(model_totals.items(), key=lambda x: -x[1]):
+                    name = format_model_name(model_id)
+                    table.add_row(f"🧠 {name}", _format_tokens(total))
+                grand_total = sum(model_totals.values())
+                table.add_row("", "")
+                table.add_row("[bold]Total[/]", f"[bold]{_format_tokens(grand_total)}[/]")
+            else:
+                table.add_row("[dim]No data[/]", "")
 
         self.query_one("#token-panel", Static).update(table)
 
@@ -1496,23 +1559,53 @@ class ClaudeDashboardApp(App):
 
     # ─── Filter indicators ────────────────────────────────────────────────
 
-    def _update_filter_indicators(self) -> None:
-        parts = []
-        if self.project_filter:
-            parts.append(f"project:{self.project_filter}")
-        if self.event_type_filter:
-            parts.append(f"event:{self.event_type_filter}")
-        if self.text_filter:
-            parts.append(f"text:\"{self.text_filter}\"")
-        if self.compact_mode:
-            parts.append("compact:on")
+    def _build_time_label(self) -> str:
+        """Build descriptive time range label for the filter bar."""
+        rng = self._stats_time_range
+        if rng == "Today":
+            today_mmdd = datetime.now().strftime("%m/%d")
+            first_time = ""
+            for entry in self.tailer.all_entries:
+                if "🟢" in entry.event and "Session started" in entry.event:
+                    if entry.timestamp.strip().startswith(today_mmdd):
+                        first_time = entry.timestamp.strip()
+                        break
+            return f"Today since {first_time}" if first_time else "Today"
+        elif rng == "7d":
+            start = (datetime.now() - timedelta(days=6)).strftime("%m/%d")
+            end = datetime.now().strftime("%m/%d")
+            return f"7d ({start}–{end})"
+        elif rng == "All":
+            first_date = self._stats_cache.get("firstSessionDate", "")
+            if first_date:
+                try:
+                    dt = datetime.fromisoformat(first_date.replace("Z", "+00:00"))
+                    return f"All time since {dt.strftime('%b %d, %Y')}"
+                except Exception:
+                    pass
+            return "All time"
+        return rng
 
+    def _update_filter_indicators(self) -> None:
+        filters = []
+        if self.project_filter:
+            filters.append(f"project:{self.project_filter}")
+        if self.event_type_filter:
+            filters.append(f"event:{self.event_type_filter}")
+        if self.text_filter:
+            filters.append(f"text:\"{self.text_filter}\"")
+        if self.compact_mode:
+            filters.append("compact:on")
+
+        time_label = self._build_time_label()
         indicator = self.query_one("#filter-indicators", Static)
-        if parts:
-            indicator.update("  ".join(parts))
-            indicator.add_class("visible")
+
+        if filters:
+            right = "  ".join(filters)
+            indicator.update(f"{time_label}  │  {right}  (t)")
         else:
-            indicator.remove_class("visible")
+            indicator.update(f"{time_label}  (t)")
+        indicator.add_class("visible")
 
     # ─── Tab 2: Stats ────────────────────────────────────────────────────
 
@@ -1526,6 +1619,7 @@ class ClaudeDashboardApp(App):
         if not data:
             return
         self._update_stats_summary(data)
+        self._update_daily_tokens_table(data)
 
     def _filter_daily_by_range(self, daily: list[dict]) -> list[dict]:
         """Filter daily data by the current time range selection."""
@@ -1534,69 +1628,251 @@ class ClaudeDashboardApp(App):
         rng = self._stats_time_range
         if rng == "All":
             return daily
-        today = datetime.now().strftime("%Y-%m-%d")
+        now = datetime.now()
         if rng == "Today":
-            return [d for d in daily if d.get("date", "") == today]
-        if rng == "24h":
-            yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-            return [d for d in daily if d.get("date", "") >= yesterday]
-        if rng == "7d":
-            cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-            return [d for d in daily if d.get("date", "") >= cutoff]
-        if rng == "30d":
-            cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-            return [d for d in daily if d.get("date", "") >= cutoff]
-        return daily
+            valid = {now.strftime("%Y-%m-%d")}
+        elif rng == "7d":
+            valid = {(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)}
+        else:
+            return daily
+        return [d for d in daily if d.get("date", "") in valid]
 
     def _update_stats_summary(self, data: dict) -> None:
-        """All-time totals + longest session."""
-        sessions = data.get("totalSessions", 0)
-        messages = data.get("totalMessages", 0)
-        daily = data.get("dailyActivity", [])
-        days_active = len(daily)
-        first_date = data.get("firstSessionDate", "")
-        longest = data.get("longestSession", {})
+        """Stats summary — respects time range filter."""
+        rng = self._stats_time_range
+        title_label = {"Today": "Today", "7d": "7 Days", "All": "All Time"}.get(rng, rng)
+        daily = self._filter_daily_by_range(data.get("dailyActivity", []))
 
-        if first_date:
+        if rng == "All":
+            sessions = data.get("totalSessions", 0)
+            messages = data.get("totalMessages", 0)
+            days_active = len(daily)
+        else:
+            sessions = sum(d.get("sessionCount", 0) for d in daily)
+            messages = sum(d.get("messageCount", 0) for d in daily)
+            days_active = len(daily)
+
+            # Supplement with live event log if cache is stale for today
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            last_computed = data.get("lastComputedDate", "")
+            if last_computed != today_str:
+                live_entries = self._filter_entries_by_time(self.tailer.all_entries)
+                today_mmdd = datetime.now().strftime("%m/%d")
+                for entry in live_entries:
+                    ts = entry.timestamp.strip()
+                    if not re.match(r"\d{2}/\d{2}", ts) or not ts.startswith(today_mmdd):
+                        continue
+                    if "🟢" in entry.event and "Session started" in entry.event:
+                        sessions += 1
+                    if "🏁" in entry.event:
+                        messages += 1
+                if days_active == 0:
+                    # Live entries exist for today but cache has no entry
+                    if any(e.timestamp.strip().startswith(today_mmdd) for e in live_entries):
+                        days_active = 1
+
+        first_date = data.get("firstSessionDate", "")
+
+        box = Text()
+        box.append(f"  Claude Code Stats ({title_label})\n", style="bold #5fafff")
+        box.append(f"  {sessions:,} sessions", style="bold")
+        box.append("  |  ", style="dim")
+        box.append(f"{messages:,} messages", style="bold")
+        if days_active > 0 and rng != "All":
+            avg_msgs = messages // days_active
+            box.append("  |  ", style="dim")
+            box.append(f"Avg {avg_msgs:,} msgs/day", style="dim")
+        if days_active > 1:
+            box.append("  |  ", style="dim")
+            box.append(f"{days_active} days active", style="bold")
+        box.append("\n")
+
+        if rng == "All" and first_date:
             try:
                 dt = datetime.fromisoformat(first_date.replace("Z", "+00:00"))
                 since = dt.strftime("%b %d, %Y")
             except Exception:
                 since = first_date[:10]
-        else:
-            since = "?"
-        avg_msgs = messages // days_active if days_active else 0
-
-        box = Text()
-        box.append("  Claude Code Stats\n", style="bold #5fafff")
-        box.append(f"  {sessions:,} sessions", style="bold")
-        box.append("  |  ", style="dim")
-        box.append(f"{messages:,} messages", style="bold")
-        box.append("  |  ", style="dim")
-        box.append(f"{days_active} days active\n", style="bold")
-        box.append(f"  Since {since}", style="dim")
-        box.append("  |  ", style="dim")
-        box.append(f"Avg {avg_msgs:,} msgs/day", style="dim")
-
-        # Longest session info
-        if longest:
-            longest_msgs = longest.get("messageCount", 0) if isinstance(longest, dict) else longest
-            if isinstance(longest_msgs, int) and longest_msgs > 0:
-                box.append("  |  ", style="dim")
-                box.append(f"Longest session: {longest_msgs} msgs", style="dim")
+            avg_msgs = messages // days_active if days_active else 0
+            box.append(f"  Since {since}", style="dim")
+            box.append("  |  ", style="dim")
+            box.append(f"Avg {avg_msgs:,} msgs/day", style="dim")
+            longest = data.get("longestSession", {})
+            if longest:
+                longest_msgs = longest.get("messageCount", 0) if isinstance(longest, dict) else longest
+                if isinstance(longest_msgs, int) and longest_msgs > 0:
+                    box.append("  |  ", style="dim")
+                    box.append(f"Longest session: {longest_msgs} msgs", style="dim")
 
         self.query_one("#stats-summary", Static).update(box)
+
+    def _update_daily_tokens_table(self, data: dict) -> None:
+        """Last 30 days of token usage per model."""
+        daily_model = data.get("dailyModelTokens", [])
+        daily_activity = data.get("dailyActivity", [])
+        # Check if live data might be available even if cache is empty
+        today_str_check = datetime.now().strftime("%Y-%m-%d")
+        last_computed_check = data.get("lastComputedDate", "")
+        has_live = last_computed_check != today_str_check and read_model_stats()
+        if not daily_model and not has_live:
+            self.query_one("#stats-daily-tokens", Static).update(
+                Text("  No daily token data available", style="dim")
+            )
+            return
+
+        # Build activity lookup for messages/sessions
+        activity_map: dict[str, dict] = {}
+        for d in daily_activity:
+            activity_map[d.get("date", "")] = d
+
+        # Collect all models seen across all days
+        all_models: set[str] = set()
+        for day in daily_model:
+            all_models.update(day.get("tokensByModel", {}).keys())
+        model_list = sorted(all_models)
+
+        # Filter by current time range
+        rng = self._stats_time_range
+        title_label = {"Today": "Today", "7d": "7 Days", "All": "All Time"}.get(rng, rng)
+        filtered = self._filter_daily_by_range(daily_model)
+
+        # Supplement with live data for today if cache is stale
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        last_computed = data.get("lastComputedDate", "")
+        date_filter = self._get_daily_token_dates()
+        if date_filter is None or today_str in date_filter:
+            if last_computed != today_str:
+                live_models = read_model_stats()
+                if live_models:
+                    # Find or create today's entry
+                    today_entry = None
+                    for d in filtered:
+                        if d.get("date") == today_str:
+                            today_entry = d
+                            break
+                    if today_entry is None:
+                        today_entry = {"date": today_str, "tokensByModel": {}}
+                        filtered.append(today_entry)
+                    for m in live_models:
+                        mid = m["model"]
+                        today_entry["tokensByModel"][mid] = today_entry["tokensByModel"].get(mid, 0) + m["total"]
+                        all_models.add(mid)
+                    model_list = sorted(all_models)
+
+                # Also add live activity data for today
+                live_entries = self._filter_entries_by_time(self.tailer.all_entries)
+                today_mmdd = datetime.now().strftime("%m/%d")
+                live_sessions = 0
+                live_messages = 0
+                for entry in live_entries:
+                    ts = entry.timestamp.strip()
+                    if not re.match(r"\d{2}/\d{2}", ts) or not ts.startswith(today_mmdd):
+                        continue
+                    if "🟢" in entry.event and "Session started" in entry.event:
+                        live_sessions += 1
+                    if "🏁" in entry.event:
+                        live_messages += 1
+                if live_sessions > 0 or live_messages > 0:
+                    act = activity_map.get(today_str, {})
+                    act["messageCount"] = act.get("messageCount", 0) + live_messages
+                    act["sessionCount"] = act.get("sessionCount", 0) + live_sessions
+                    act["date"] = today_str
+                    activity_map[today_str] = act
+
+        filtered.sort(key=lambda d: d.get("date", ""), reverse=True)
+
+        table = Table(
+            show_header=True, show_edge=False, box=None, padding=(0, 1),
+            title=f"[bold]🪙 Daily Token Usage ({title_label})[/]", title_style="bold",
+            expand=True,
+        )
+        table.add_column("Date", style="dim", width=12)
+        for mid in model_list:
+            table.add_column(format_model_name(mid), justify="right", min_width=10)
+        table.add_column("Total", justify="right", style="bold", min_width=10)
+        table.add_column("Msgs", justify="right", style="dim", width=7)
+        table.add_column("Sessions", justify="right", style="dim", width=8)
+
+        # Paginate: show 30 days at a time, navigable with 'n' key
+        page_size = 30
+        total_days = len(filtered)
+        total_pages = max(1, (total_days + page_size - 1) // page_size)
+        # Clamp page index
+        if self._daily_tokens_page >= total_pages:
+            self._daily_tokens_page = 0
+        page_start = self._daily_tokens_page * page_size
+        display = filtered[page_start:page_start + page_size]
+
+        for day in display:
+            date_str = day.get("date", "")
+            tokens_by_model = day.get("tokensByModel", {})
+
+            # Format date as Mon MM/DD
+            try:
+                dt = datetime.strptime(date_str, "%Y-%m-%d")
+                display_date = dt.strftime("%a %m/%d")
+            except ValueError:
+                display_date = date_str
+
+            row = [display_date]
+            day_total = 0
+            for mid in model_list:
+                t = tokens_by_model.get(mid, 0)
+                day_total += t
+                row.append(_format_tokens(t) if t > 0 else "—")
+            row.append(_format_tokens(day_total))
+
+            # Add activity data
+            act = activity_map.get(date_str, {})
+            msgs = act.get("messageCount", 0)
+            sess = act.get("sessionCount", 0)
+            row.append(f"{msgs:,}" if msgs else "—")
+            row.append(str(sess) if sess else "—")
+
+            table.add_row(*row)
+
+        # Totals row (over displayed page)
+        totals = ["[bold]Total[/]"]
+        grand = 0
+        for mid in model_list:
+            model_sum = sum(d.get("tokensByModel", {}).get(mid, 0) for d in display)
+            grand += model_sum
+            totals.append(f"[bold]{_format_tokens(model_sum)}[/]")
+        totals.append(f"[bold]{_format_tokens(grand)}[/]")
+        total_msgs = sum(activity_map.get(d.get("date", ""), {}).get("messageCount", 0) for d in display)
+        total_sess = sum(activity_map.get(d.get("date", ""), {}).get("sessionCount", 0) for d in display)
+        totals.append(f"[bold]{total_msgs:,}[/]")
+        totals.append(f"[bold]{total_sess}[/]")
+        table.add_row(*totals)
+
+        if total_pages > 1:
+            page_num = self._daily_tokens_page + 1
+            hint = f"[dim]  Page {page_num}/{total_pages} ({total_days} days) — press [bold]n[/bold] for next page[/]"
+            table.add_row(*[""] * (len(model_list) + 4))
+            empty = [""] * (len(model_list) + 3)
+            table.add_row(hint, *empty)
+
+        self.query_one("#stats-daily-tokens", Static).update(table)
 
     # ─── Actions ──────────────────────────────────────────────────────────
 
     def action_cycle_time_range(self) -> None:
-        """Cycle time range globally: Today → 24h → 7d → 30d → All."""
+        """Cycle time range globally: Today → 7d → All."""
         idx = self._time_range_options.index(self._stats_time_range)
         idx = (idx + 1) % len(self._time_range_options)
         self._stats_time_range = self._time_range_options[idx]
+        self._daily_tokens_page = 0  # Reset page on time range change
+        self._rebuild_log()
         self._update_sidebar()
         if self._is_stats_tab():
             self._refresh_stats_tab()
+
+    def action_next_page(self) -> None:
+        """Cycle to next page of daily token table (Stats tab)."""
+        if not self._is_stats_tab():
+            return
+        self._daily_tokens_page += 1  # Will wrap in _update_daily_tokens_table
+        self._refresh_stats_tab()
 
     def action_toggle_filter(self) -> None:
         """Show/hide the filter input (Tab 1 only)."""
