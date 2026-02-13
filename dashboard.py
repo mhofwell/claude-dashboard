@@ -40,6 +40,7 @@ EVENT_STYLES = {
     "⚠️": "bold #d75f5f",
     "⚡": "bold #5fafff",
     "🔌": "bold #af87ff",
+    "📐": "bold #2e8b57",
     "🚀": "bold #5fd7d7",
     "🤖": "bold #5fd7d7",
     "👥": "bold #5fd7d7",
@@ -142,7 +143,7 @@ def count_events(lines: list[str]) -> dict:
         "mcp": 0, "agents": 0, "subagents": 0, "landed": 0, "finished": 0,
         "plans": 0, "tasks": 0, "sessions": 0, "ended": 0,
         "input": 0, "permission": 0, "questions": 0,
-        "completed": 0, "compacts": 0,
+        "completed": 0, "compacts": 0, "skills": 0,
     }
     for line in lines:
         clean = strip_ansi(line)
@@ -156,6 +157,8 @@ def count_events(lines: list[str]) -> dict:
             counts["fetches"] += 1
         if "🔌" in clean:
             counts["mcp"] += 1
+        if "⚡" in clean:
+            counts["skills"] += 1
         if "🚀" in clean:
             counts["agents"] += 1
         if "🤖" in clean:
@@ -400,7 +403,6 @@ def build_agent_tree(entries: list[LogEntry]) -> list[SessionNode]:
     """Build agent tree from log entries using stack-based inference."""
     sessions: list[SessionNode] = []
     current_sessions: dict[str, SessionNode] = {}
-    agent_stacks: dict[str, list[AgentNode]] = {}
     agent_map: dict[str, AgentNode] = {}
 
     for entry in entries:
@@ -418,12 +420,10 @@ def build_agent_tree(entries: list[LogEntry]) -> list[SessionNode]:
                 model=model,
             )
             current_sessions[entry.project] = node
-            agent_stacks[entry.project] = []
 
         elif "🔴" in entry.event and "Session ended" in entry.event:
             if entry.project in current_sessions:
                 sessions.append(current_sessions.pop(entry.project))
-                agent_stacks.pop(entry.project, None)
 
         elif "🚀" in entry.event and "Spawned agent" in entry.event:
             m = re.search(r"Spawned agent:?\s*(?:(\S+)\s+)?\(?(\w+)\)?", entry.event)
@@ -440,13 +440,11 @@ def build_agent_tree(entries: list[LogEntry]) -> list[SessionNode]:
                 proj = entry.project
                 if proj in current_sessions:
                     current_sessions[proj].last_event_time = entry.timestamp
-                    stack = agent_stacks.get(proj, [])
-                    if stack:
-                        stack[-1].children.append(agent)
-                    else:
-                        current_sessions[proj].agents.append(agent)
-                    stack.append(agent)
-                    agent_stacks[proj] = stack
+                    # Always add as top-level agent — the event log
+                    # doesn't indicate parent/child relationships, so
+                    # stack-based nesting incorrectly nests parallel
+                    # agents (e.g. multiple Explore agents) as children.
+                    current_sessions[proj].agents.append(agent)
 
         elif "🛬" in entry.event and "Agent finished" in entry.event:
             m = re.search(r"Agent finished:?\s*(?:\S+\s+)?\(?(\w+)\)?", entry.event)
@@ -461,10 +459,6 @@ def build_agent_tree(entries: list[LogEntry]) -> list[SessionNode]:
                 proj = entry.project
                 if proj in current_sessions:
                     current_sessions[proj].last_event_time = entry.timestamp
-                if proj in agent_stacks:
-                    stack = agent_stacks[proj]
-                    if stack and stack[-1].agent_id == aid:
-                        stack.pop()
 
         else:
             # Track any event for this project to keep session fresh
@@ -1194,6 +1188,7 @@ class ClaudeDashboardApp(App):
         table.add_row("🔍 Search", str(counts["searches"]))
         table.add_row("🌐 Fetch", str(counts["fetches"]))
         table.add_row("🔌 MCP call", str(counts["mcp"]))
+        table.add_row("⚡ Skill use", str(counts["skills"]))
         table.add_row("🚀 Agent spawn", str(counts["agents"]))
         table.add_row("🤖 Agent task", str(counts["subagents"]))
         table.add_row("🛬 Agent finished", str(counts["landed"]))
@@ -1409,8 +1404,9 @@ class ClaudeDashboardApp(App):
         text.append(branch, style="dim #555555")
 
         atype = agent.agent_type[:14]
-        text.append(f"{spinner} ", style="bold #5fd7d7")
-        text.append(atype, style="bold #5fd7d7")
+        color = "#2e8b57" if atype == "Plan" else "#5fd7d7"
+        text.append(f"{spinner} ", style=f"bold {color}")
+        text.append(atype, style=f"bold {color}")
         text.append("\n")
 
         running_children = [c for c in agent.children if c.is_running]
@@ -1534,9 +1530,10 @@ class ClaudeDashboardApp(App):
                 running_agents = [a for a in session.agents if a.is_running]
                 for agent in running_agents:
                     atype = agent.agent_type[:14]
+                    color = "#2e8b57" if atype == "Plan" else "#5fd7d7"
                     agent_text = Text()
-                    agent_text.append(f"  {spinner} ", style="bold #5fd7d7")
-                    agent_text.append(atype, style="#5fd7d7")
+                    agent_text.append(f"  {spinner} ", style=f"bold {color}")
+                    agent_text.append(atype, style=color)
                     empty = Text("")
                     table.add_row(empty, agent_text, empty, empty, empty, empty, empty, empty)
 
