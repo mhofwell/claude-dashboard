@@ -554,9 +554,11 @@ class ProcessScanner:
 
     def __init__(self):
         self._instances: list[ProcessInstance] = []
+        self.generation: int = 0
 
     def scan(self) -> list[ProcessInstance]:
         """Scan for running Claude processes using ps + lsof."""
+        self.generation += 1
         try:
             result = subprocess.run(
                 ["ps", "-eo", "pid,tty,pcpu,rss,etime,comm"],
@@ -941,6 +943,11 @@ class ClaudeDashboardApp(App):
         self._stats_time_range: str = "Today"
         self._time_range_options: list[str] = ["Today", "7d", "All"]
         self._daily_tokens_page: int = 0
+        # Sidebar cache — avoid recomputing on every 0.5s tick
+        self._sidebar_entry_count: int = 0
+        self._sidebar_scan_gen: int = 0  # bumped each process scan
+        self._cached_event_counts: dict = {}
+        self._cached_sessions: list[SessionNode] = []
 
     def compose(self) -> ComposeResult:
         yield Static("", id="header-bar")
@@ -1177,14 +1184,29 @@ class ClaudeDashboardApp(App):
     def _update_sidebar(self) -> None:
         """Update all sidebar panels. Also increments spinner for instances."""
         self._spinner_idx = (self._spinner_idx + 1) % len(BRAILLE_SPINNER)
-        filtered_entries = self._filter_entries_by_time(self.tailer.all_entries)
-        raw_lines = [e.raw for e in filtered_entries]
-        self._update_stats_panel(raw_lines)
-        self._update_token_panel()
+
+        # Only recompute expensive data when entries or processes change
+        entry_count = len(self.tailer.all_entries)
+        scan_gen = self.scanner.generation
+        data_changed = (
+            entry_count != self._sidebar_entry_count
+            or scan_gen != self._sidebar_scan_gen
+        )
+
+        if data_changed:
+            self._sidebar_entry_count = entry_count
+            self._sidebar_scan_gen = scan_gen
+            filtered_entries = self._filter_entries_by_time(self.tailer.all_entries)
+            raw_lines = [e.raw for e in filtered_entries]
+            self._cached_event_counts = count_events(raw_lines)
+            self._cached_sessions = build_agent_tree(self.tailer.all_entries)
+            self._update_stats_panel(self._cached_event_counts)
+            self._update_token_panel()
+
+        # Instances panel always re-renders (cheap) for spinner animation
         self._update_instances_panel()
 
-    def _update_stats_panel(self, lines: list[str]) -> None:
-        counts = count_events(lines)
+    def _update_stats_panel(self, counts: dict) -> None:
         table = Table(
             show_header=False, show_edge=False, box=None, padding=(0, 1),
             title="[bold]📊 Stats[/]", title_style="bold",
@@ -1333,10 +1355,9 @@ class ClaudeDashboardApp(App):
 
         spinner = BRAILLE_SPINNER[self._spinner_idx % len(BRAILLE_SPINNER)]
 
-        # Build session map from event log for enrichment (subagents)
-        sessions = build_agent_tree(self.tailer.all_entries)
+        # Use cached sessions for enrichment (subagents)
         session_map: dict[str, SessionNode] = {}
-        for sess in sessions:
+        for sess in self._cached_sessions:
             if sess.is_active:
                 key = sess.project.lower().replace("-", "").replace("_", "")
                 session_map[key] = sess
