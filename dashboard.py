@@ -24,6 +24,8 @@ LOG_FILE = CLAUDE_DIR / "events.log"
 TOKEN_FILE = CLAUDE_DIR / "token-stats"
 MODEL_FILE = CLAUDE_DIR / "model-stats"
 STATS_CACHE_FILE = CLAUDE_DIR / "stats-cache.json"
+PROJECTS_DIR = CLAUDE_DIR / "projects"
+PROJECT_TOKEN_CACHE = CLAUDE_DIR / "project-token-cache.json"
 
 # ─── ANSI ─────────────────────────────────────────────────────────────────────
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
@@ -311,6 +313,158 @@ def load_stats_cache() -> dict:
         return {}
 
 
+_TOKEN_KEYS = ("input", "output", "cache_read", "cache_write")
+
+
+def _empty_token_bucket() -> dict[str, int]:
+    return {k: 0 for k in _TOKEN_KEYS}
+
+
+def _token_total(bucket: dict[str, int]) -> int:
+    return sum(bucket[k] for k in _TOKEN_KEYS)
+
+
+class ProjectTokenScanner:
+    """Scans JSONL session files to aggregate per-project token usage."""
+
+    def __init__(self):
+        # filepath → (project_name, {date: {model: {input, output, cache_read, cache_write}}})
+        self._file_data: dict[str, tuple[str, dict]] = {}
+        self._file_mtimes: dict[str, float] = {}
+
+    def load_cache(self) -> None:
+        if not PROJECT_TOKEN_CACHE.exists():
+            return
+        try:
+            raw = json.loads(PROJECT_TOKEN_CACHE.read_text())
+            self._file_data = {
+                fp: (entry["project"], entry["dates"])
+                for fp, entry in raw.get("files", {}).items()
+            }
+            self._file_mtimes = raw.get("mtimes", {})
+        except Exception:
+            pass
+
+    def save_cache(self) -> None:
+        try:
+            raw = {
+                "files": {
+                    fp: {"project": proj, "dates": dates}
+                    for fp, (proj, dates) in self._file_data.items()
+                },
+                "mtimes": self._file_mtimes,
+            }
+            PROJECT_TOKEN_CACHE.write_text(json.dumps(raw))
+        except Exception:
+            pass
+
+    def scan_incremental(self) -> bool:
+        if not PROJECTS_DIR.exists():
+            return False
+        changed = False
+        seen_files: set[str] = set()
+        for jsonl_path in PROJECTS_DIR.glob("*/*.jsonl"):
+            fp = str(jsonl_path)
+            seen_files.add(fp)
+            try:
+                mtime = jsonl_path.stat().st_mtime
+            except OSError:
+                continue
+            if fp in self._file_mtimes and self._file_mtimes[fp] == mtime:
+                continue
+            self._scan_file(fp)
+            self._file_mtimes[fp] = mtime
+            changed = True
+        # Remove entries for deleted files
+        for fp in list(self._file_data.keys()):
+            if fp not in seen_files:
+                del self._file_data[fp]
+                self._file_mtimes.pop(fp, None)
+                changed = True
+        return changed
+
+    def _scan_file(self, filepath: str) -> None:
+        project = ""
+        dates: dict[str, dict[str, dict[str, int]]] = {}
+        # Map from JSONL field names to our internal key names
+        usage_field_map = {
+            "input": "input_tokens",
+            "output": "output_tokens",
+            "cache_read": "cache_read_input_tokens",
+            "cache_write": "cache_creation_input_tokens",
+        }
+        try:
+            with open(filepath, "r", errors="replace") as f:
+                for line in f:
+                    if '"usage"' not in line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    msg = obj.get("message")
+                    if not msg or not isinstance(msg, dict):
+                        continue
+                    usage = msg.get("usage")
+                    if not usage or not isinstance(usage, dict):
+                        continue
+                    if not project:
+                        cwd = obj.get("cwd", "")
+                        if cwd:
+                            project = _derive_project_name(cwd)
+                    ts = obj.get("timestamp", "")
+                    if not ts:
+                        continue
+                    date = ts[:10]  # YYYY-MM-DD
+                    model = msg.get("model", "unknown")
+                    bucket = dates.setdefault(date, {}).setdefault(model, _empty_token_bucket())
+                    for key, field in usage_field_map.items():
+                        bucket[key] += usage.get(field, 0)
+        except Exception:
+            pass
+        if not project:
+            # Derive from directory structure: projects/<hash>/<session>.jsonl
+            try:
+                project = Path(filepath).parent.parent.name[:16]
+            except Exception:
+                project = "unknown"
+        self._file_data[filepath] = (project, dates)
+
+    def get_project_totals(self, date_filter: set[str] | None, project: str) -> dict[str, dict[str, int]]:
+        """Returns {model: {input, output, cache_read, cache_write, total}} for a project."""
+        result: dict[str, dict[str, int]] = {}
+        for _fp, (proj, dates) in self._file_data.items():
+            if proj != project:
+                continue
+            for date, models in dates.items():
+                if date_filter is not None and date not in date_filter:
+                    continue
+                for model, tokens in models.items():
+                    if model not in result:
+                        result[model] = {**_empty_token_bucket(), "total": 0}
+                    for key in _TOKEN_KEYS:
+                        result[model][key] += tokens[key]
+                    result[model]["total"] += _token_total(tokens)
+        return result
+
+    def get_project_daily(self, project: str, date_filter: set[str] | None) -> list[dict]:
+        """Returns [{date, tokensByModel: {model: total}}] for a project."""
+        daily: dict[str, dict[str, int]] = {}
+        for _fp, (proj, dates) in self._file_data.items():
+            if proj != project:
+                continue
+            for date, models in dates.items():
+                if date_filter is not None and date not in date_filter:
+                    continue
+                day_bucket = daily.setdefault(date, {})
+                for model, tokens in models.items():
+                    day_bucket[model] = day_bucket.get(model, 0) + _token_total(tokens)
+        return [{"date": d, "tokensByModel": m} for d, m in sorted(daily.items(), reverse=True)]
+
+    def all_projects(self) -> list[str]:
+        return sorted({proj for _fp, (proj, _dates) in self._file_data.items() if proj})
+
+
 def _format_tokens(n: int) -> str:
     """Format token count as B/M/K."""
     if n >= 1_000_000_000:
@@ -442,6 +596,21 @@ def build_agent_tree(entries: list[LogEntry]) -> list[SessionNode]:
                 if proj in current_sessions:
                     current_sessions[proj].last_event_time = entry.timestamp
 
+        elif "✅" in entry.event and "Task completed by" in entry.event:
+            # "✅ Task completed by dashboard-dev: ..." — mark agent finished by name
+            m = re.search(r"Task completed by (\S+)", entry.event)
+            if m:
+                agent_name = m.group(1).rstrip(":")
+                proj = entry.project
+                if proj in current_sessions:
+                    current_sessions[proj].last_event_time = entry.timestamp
+                    for agent in reversed(current_sessions[proj].agents):
+                        if agent.is_running and agent.agent_type == agent_name:
+                            agent.is_running = False
+                            agent.end_time = entry.timestamp
+                            agent.duration_minutes = _time_diff_minutes(agent.start_time, agent.end_time)
+                            break
+
         else:
             # Track any event for this project to keep session fresh
             if entry.project in current_sessions:
@@ -452,14 +621,14 @@ def build_agent_tree(entries: list[LogEntry]) -> list[SessionNode]:
         sess.is_active = True
         sessions.append(sess)
 
-    # Expire stale agents: if spawned >1 hour ago with no finish event,
+    # Expire stale agents: if spawned >10 min ago with no finish event,
     # assume the finish event was lost and stop showing them as running.
     now = datetime.now()
     for sess in sessions:
         for agent in sess.agents:
             if agent.is_running:
                 started = _parse_timestamp(agent.start_time)
-                if started and (now - started).total_seconds() > 3600:
+                if started and (now - started).total_seconds() > 600:
                     agent.is_running = False
 
     return sessions
@@ -929,6 +1098,7 @@ class ClaudeDashboardApp(App):
         self._event_type_idx = 0  # 0 = All
         self._filter_debounce_timer: Timer | None = None
         self._stats_cache: dict = {}
+        self._project_token_scanner = ProjectTokenScanner()
         self._active_tab: str = "tab-live"
         self._spinner_idx: int = 0
         self._stats_time_range: str = "Today"
@@ -978,17 +1148,24 @@ class ClaudeDashboardApp(App):
         self._update_header()
 
         self._stats_cache = load_stats_cache()
+        self._project_token_scanner.load_cache()
         self._refresh_stats_tab()
         self._refresh_instances_tab()
 
         self.query_one("#event-log", RichLog).focus()
+        self.run_worker(self._initial_project_scan)
 
-        # Timers: poll + sidebar at 0.5s, header at 1s, processes at 3s, stats cache at 30s
+        # Timers: poll + sidebar at 0.5s, header at 1s, processes at 3s, stats cache at 30s, project scan at 30s
         self.set_interval(0.5, self._poll_new_entries)
         self.set_interval(0.5, self._update_sidebar)
         self.set_interval(1.0, self._update_header)
         self.set_interval(3.0, self._poll_processes)
         self.set_interval(30.0, self._reload_stats_cache)
+
+    async def _initial_project_scan(self) -> None:
+        self._project_token_scanner.scan_incremental()
+        self._project_token_scanner.save_cache()
+        self._discover_projects()
 
     # ─── Tab switching ─────────────────────────────────────────────────────
 
@@ -1236,83 +1413,93 @@ class ClaudeDashboardApp(App):
         now = datetime.now()
         if rng == "Today":
             return {now.strftime("%Y-%m-%d")}
-        elif rng == "7d":
+        if rng == "7d":
             return {(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)}
         return None
+
+    def _add_model_rows(self, table: Table, models: list[tuple[str, int, int, int]], empty_label: str = "[dim]No data[/]") -> None:
+        """Add per-model rows with optional cache ratio to a token table.
+
+        Each entry in models is (model_id, total_tokens, cache_read, output).
+        When output > 0, a cache ratio annotation is shown.
+        """
+        if not models:
+            table.add_row(empty_label, "")
+            return
+        table.add_row("", "")
+        for model_id, total, cache_read, output in sorted(models, key=lambda x: -x[1]):
+            name = format_model_name(model_id)
+            if output > 0:
+                cache_ratio = cache_read / output
+                table.add_row(f"🧠 {name}", f"{_format_tokens(total)} [dim](cache {cache_ratio:.0f}x)[/]")
+            else:
+                table.add_row(f"🧠 {name}", _format_tokens(total))
+        grand_total = sum(t for _, t, _, _ in models)
+        table.add_row("", "")
+        table.add_row("[bold]Total[/]", f"[bold]{_format_tokens(grand_total)}[/]")
+
+    def _make_token_table(self, title: str) -> Table:
+        """Create a standard two-column token panel table."""
+        table = Table(
+            show_header=False, show_edge=False, box=None, padding=(0, 1),
+            title=title, title_style="bold",
+            expand=True,
+        )
+        table.add_column(style="bold", width=16)
+        table.add_column(justify="right")
+        return table
 
     def _update_token_panel(self) -> None:
         """Token panel — shows per-model tokens for the selected time range."""
         rng = self._stats_time_range
         title_label = TIME_RANGE_LABELS.get(rng, rng)
-        table = Table(
-            show_header=False, show_edge=False, box=None, padding=(0, 1),
-            title=f"[bold]🪙 Tokens ({title_label})[/]", title_style="bold",
-            expand=True,
-        )
-        table.add_column(style="bold", width=16)
-        table.add_column(justify="right")
 
+        # Per-project mode: use scanner data
+        if self.project_filter:
+            table = self._make_token_table(f"[bold]🪙 Tokens ({title_label}) — {self.project_filter}[/]")
+            date_filter = self._get_daily_token_dates()
+            model_totals = self._project_token_scanner.get_project_totals(date_filter, self.project_filter)
+            models = [
+                (mid, t["total"], t["cache_read"], t["output"])
+                for mid, t in model_totals.items()
+            ]
+            self._add_model_rows(table, models)
+            self.query_one("#token-panel", Static).update(table)
+            return
+
+        table = self._make_token_table(f"[bold]🪙 Tokens ({title_label})[/]")
         date_filter = self._get_daily_token_dates()
 
         if date_filter is None:
             # All Time — use modelUsage for full breakdown with cache ratios
             model_usage = self._stats_cache.get("modelUsage", {})
-            if model_usage:
-                table.add_row("", "")
-                for model_id, usage in sorted(model_usage.items(), key=lambda x: -(
-                    x[1].get("inputTokens", 0) + x[1].get("outputTokens", 0)
-                    + x[1].get("cacheReadInputTokens", 0) + x[1].get("cacheCreationInputTokens", 0)
-                )):
-                    name = format_model_name(model_id)
-                    inp = usage.get("inputTokens", 0)
-                    out = usage.get("outputTokens", 0)
-                    cache_read = usage.get("cacheReadInputTokens", 0)
-                    cache_write = usage.get("cacheCreationInputTokens", 0)
-                    total = inp + out + cache_read + cache_write
-                    if out > 0:
-                        cache_ratio = cache_read / out
-                        table.add_row(f"🧠 {name}", f"{_format_tokens(total)} [dim](cache {cache_ratio:.0f}x)[/]")
-                    else:
-                        table.add_row(f"🧠 {name}", _format_tokens(total))
-                grand_total = sum(
-                    u.get("inputTokens", 0) + u.get("outputTokens", 0)
-                    + u.get("cacheReadInputTokens", 0) + u.get("cacheCreationInputTokens", 0)
-                    for u in model_usage.values()
-                )
-                table.add_row("", "")
-                table.add_row("[bold]Total[/]", f"[bold]{_format_tokens(grand_total)}[/]")
-            else:
-                table.add_row("[dim]Waiting...[/]", "")
+            models = []
+            for model_id, usage in model_usage.items():
+                inp = usage.get("inputTokens", 0)
+                out = usage.get("outputTokens", 0)
+                cache_read = usage.get("cacheReadInputTokens", 0)
+                cache_write = usage.get("cacheCreationInputTokens", 0)
+                models.append((model_id, inp + out + cache_read + cache_write, cache_read, out))
+            self._add_model_rows(table, models, empty_label="[dim]Waiting...[/]")
         else:
             # Today / 7d — aggregate dailyModelTokens + live model-stats
             daily_model = self._stats_cache.get("dailyModelTokens", [])
             today_str = datetime.now().strftime("%Y-%m-%d")
 
-            # Aggregate cached daily data for the date range
-            model_totals: dict[str, int] = {}
+            model_totals_map: dict[str, int] = {}
             for day in daily_model:
                 if day.get("date", "") in date_filter:
                     for model_id, tokens in day.get("tokensByModel", {}).items():
-                        model_totals[model_id] = model_totals.get(model_id, 0) + tokens
+                        model_totals_map[model_id] = model_totals_map.get(model_id, 0) + tokens
 
-            # If today is in the range and cache is stale, add live model-stats
-            live_models = []
             if today_str in date_filter and self._is_cache_stale_for_today():
-                live_models = read_model_stats()
-                for m in live_models:
+                for m in read_model_stats():
                     mid = m["model"]
-                    model_totals[mid] = model_totals.get(mid, 0) + m["total"]
+                    model_totals_map[mid] = model_totals_map.get(mid, 0) + m["total"]
 
-            if model_totals:
-                table.add_row("", "")
-                for model_id, total in sorted(model_totals.items(), key=lambda x: -x[1]):
-                    name = format_model_name(model_id)
-                    table.add_row(f"🧠 {name}", _format_tokens(total))
-                grand_total = sum(model_totals.values())
-                table.add_row("", "")
-                table.add_row("[bold]Total[/]", f"[bold]{_format_tokens(grand_total)}[/]")
-            else:
-                table.add_row("[dim]No data[/]", "")
+            # No cache breakdown available for daily aggregates
+            models = [(mid, total, 0, 0) for mid, total in model_totals_map.items()]
+            self._add_model_rows(table, models)
 
         self.query_one("#token-panel", Static).update(table)
 
@@ -1564,6 +1751,8 @@ class ClaudeDashboardApp(App):
         for entry in self.tailer.all_entries:
             if entry.project:
                 seen.add(entry.project)
+        for proj in self._project_token_scanner.all_projects():
+            seen.add(proj)
         self._projects = sorted(seen)
 
     # ─── Filter indicators ────────────────────────────────────────────────
@@ -1584,7 +1773,7 @@ class ClaudeDashboardApp(App):
             start = (datetime.now() - timedelta(days=6)).strftime("%m/%d")
             end = datetime.now().strftime("%m/%d")
             return f"7d ({start}–{end})"
-        elif rng == "All":
+        if rng == "All":
             first_date = self._stats_cache.get("firstSessionDate", "")
             if first_date:
                 try:
@@ -1620,6 +1809,7 @@ class ClaudeDashboardApp(App):
 
     def _reload_stats_cache(self) -> None:
         self._stats_cache = load_stats_cache()
+        self._project_token_scanner.scan_incremental()
         if self._is_stats_tab():
             self._refresh_stats_tab()
 
@@ -1649,7 +1839,7 @@ class ClaudeDashboardApp(App):
 
     def _refresh_stats_tab(self) -> None:
         data = self._stats_cache
-        if not data:
+        if not data and not self.project_filter:
             return
         self._update_stats_summary(data)
         self._update_daily_tokens_table(data)
@@ -1664,9 +1854,40 @@ class ClaudeDashboardApp(App):
         return [d for d in daily if d.get("date", "") in valid]
 
     def _update_stats_summary(self, data: dict) -> None:
-        """Stats summary — respects time range filter."""
+        """Stats summary — respects time range filter and project filter."""
         rng = self._stats_time_range
         title_label = TIME_RANGE_LABELS.get(rng, rng)
+
+        if self.project_filter:
+            # Per-project: count sessions/messages from event log entries matching the project
+            entries = self._filter_entries_by_time(self.tailer.all_entries)
+            sessions = 0
+            messages = 0
+            dates_seen: set[str] = set()
+            for entry in entries:
+                if entry.project != self.project_filter:
+                    continue
+                if "🟢" in entry.event and "Session started" in entry.event:
+                    sessions += 1
+                if "🏁" in entry.event:
+                    messages += 1
+                m = re.match(r"(\d{2}/\d{2})", entry.timestamp.strip())
+                if m:
+                    dates_seen.add(m.group(1))
+            days_active = len(dates_seen)
+
+            box = Text()
+            box.append(f"  {self.project_filter} ({title_label})\n", style="bold #5fafff")
+            box.append(f"  {sessions:,} sessions", style="bold")
+            box.append("  |  ", style="dim")
+            box.append(f"{messages:,} messages", style="bold")
+            if days_active > 1:
+                box.append("  |  ", style="dim")
+                box.append(f"{days_active} days active", style="bold")
+            box.append("\n")
+            self.query_one("#stats-summary", Static).update(box)
+            return
+
         daily = self._filter_daily_by_range(data.get("dailyActivity", []))
 
         if rng == "All":
@@ -1723,6 +1944,11 @@ class ClaudeDashboardApp(App):
 
     def _update_daily_tokens_table(self, data: dict) -> None:
         """Last 30 days of token usage per model."""
+        # Per-project mode: use scanner data
+        if self.project_filter:
+            self._update_daily_tokens_table_project()
+            return
+
         daily_model = data.get("dailyModelTokens", [])
         daily_activity = data.get("dailyActivity", [])
         # Check if live data might be available even if cache is empty
@@ -1794,28 +2020,13 @@ class ClaudeDashboardApp(App):
         table.add_column("Msgs", justify="right", style="dim", width=7)
         table.add_column("Sessions", justify="right", style="dim", width=8)
 
-        # Paginate: show 30 days at a time, navigable with 'n' key
-        page_size = 30
-        total_days = len(filtered)
-        total_pages = max(1, (total_days + page_size - 1) // page_size)
-        # Clamp page index
-        if self._daily_tokens_page >= total_pages:
-            self._daily_tokens_page = 0
-        page_start = self._daily_tokens_page * page_size
-        display = filtered[page_start:page_start + page_size]
+        display, total_days, total_pages = self._paginate_daily(filtered)
 
         for day in display:
             date_str = day.get("date", "")
             tokens_by_model = day.get("tokensByModel", {})
 
-            # Format date as Mon MM/DD
-            try:
-                dt = datetime.strptime(date_str, "%Y-%m-%d")
-                display_date = dt.strftime("%a %m/%d")
-            except ValueError:
-                display_date = date_str
-
-            row = [display_date]
+            row = [self._format_daily_date(date_str)]
             day_total = 0
             for mid in model_list:
                 t = tokens_by_model.get(mid, 0)
@@ -1846,13 +2057,88 @@ class ClaudeDashboardApp(App):
         totals.append(f"[bold]{total_sess}[/]")
         table.add_row(*totals)
 
-        if total_pages > 1:
-            page_num = self._daily_tokens_page + 1
-            hint = f"[dim]  Page {page_num}/{total_pages} ({total_days} days) — press [bold]n[/bold] for next page[/]"
-            table.add_row(*[""] * (len(model_list) + 4))
-            empty = [""] * (len(model_list) + 3)
-            table.add_row(hint, *empty)
+        # +4 columns: Date + models + Total + Msgs + Sessions
+        self._add_page_hint(table, len(model_list) + 4, total_days, total_pages)
+        self.query_one("#stats-daily-tokens", Static).update(table)
 
+    def _paginate_daily(self, days: list[dict], page_size: int = 30) -> tuple[list[dict], int, int]:
+        """Paginate a list of daily entries. Returns (page_slice, total_days, total_pages)."""
+        total_days = len(days)
+        total_pages = max(1, (total_days + page_size - 1) // page_size)
+        if self._daily_tokens_page >= total_pages:
+            self._daily_tokens_page = 0
+        start = self._daily_tokens_page * page_size
+        return days[start:start + page_size], total_days, total_pages
+
+    def _add_page_hint(self, table: Table, total_columns: int, total_days: int, total_pages: int) -> None:
+        """Add pagination hint row to a daily tokens table if needed."""
+        if total_pages <= 1:
+            return
+        page_num = self._daily_tokens_page + 1
+        hint = f"[dim]  Page {page_num}/{total_pages} ({total_days} days) — press [bold]n[/bold] for next page[/]"
+        table.add_row(*[""] * total_columns)
+        table.add_row(hint, *[""] * (total_columns - 1))
+
+    def _format_daily_date(self, date_str: str) -> str:
+        """Format YYYY-MM-DD as 'Mon MM/DD'."""
+        try:
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            return dt.strftime("%a %m/%d")
+        except ValueError:
+            return date_str
+
+    def _update_daily_tokens_table_project(self) -> None:
+        """Daily token table for a single project using scanner data."""
+        rng = self._stats_time_range
+        title_label = TIME_RANGE_LABELS.get(rng, rng)
+        date_filter = self._get_daily_token_dates()
+        daily = self._project_token_scanner.get_project_daily(self.project_filter, date_filter)
+
+        if not daily:
+            self.query_one("#stats-daily-tokens", Static).update(
+                Text(f"  No token data for {self.project_filter}", style="dim")
+            )
+            return
+
+        all_models: set[str] = set()
+        for day in daily:
+            all_models.update(day.get("tokensByModel", {}).keys())
+        model_list = sorted(all_models)
+
+        table = Table(
+            show_header=True, show_edge=False, box=None, padding=(0, 1),
+            title=f"[bold]🪙 Daily Token Usage ({title_label}) — {self.project_filter}[/]",
+            title_style="bold",
+            expand=True,
+        )
+        table.add_column("Date", style="dim", width=12)
+        for mid in model_list:
+            table.add_column(format_model_name(mid), justify="right", min_width=10)
+        table.add_column("Total", justify="right", style="bold", min_width=10)
+
+        display, total_days, total_pages = self._paginate_daily(daily)
+
+        for day in display:
+            tokens_by_model = day.get("tokensByModel", {})
+            row = [self._format_daily_date(day.get("date", ""))]
+            day_total = 0
+            for mid in model_list:
+                t = tokens_by_model.get(mid, 0)
+                day_total += t
+                row.append(_format_tokens(t) if t > 0 else "—")
+            row.append(_format_tokens(day_total))
+            table.add_row(*row)
+
+        totals = ["[bold]Total[/]"]
+        grand = 0
+        for mid in model_list:
+            model_sum = sum(d.get("tokensByModel", {}).get(mid, 0) for d in display)
+            grand += model_sum
+            totals.append(f"[bold]{_format_tokens(model_sum)}[/]")
+        totals.append(f"[bold]{_format_tokens(grand)}[/]")
+        table.add_row(*totals)
+
+        self._add_page_hint(table, len(model_list) + 2, total_days, total_pages)
         self.query_one("#stats-daily-tokens", Static).update(table)
 
     # ─── Actions ──────────────────────────────────────────────────────────
@@ -1890,10 +2176,8 @@ class ClaudeDashboardApp(App):
             filter_input.focus()
 
     def action_cycle_project(self) -> None:
-        """Cycle project filter: All → proj1 → proj2 → ... → All (Tab 1 only)."""
-        if not self._is_live_tab():
-            return
-        if self.query_one("#filter-input", Input).has_focus:
+        """Cycle project filter: All → proj1 → proj2 → ... → All."""
+        if self._is_live_tab() and self.query_one("#filter-input", Input).has_focus:
             return
         if not self._projects:
             return
@@ -1902,7 +2186,11 @@ class ClaudeDashboardApp(App):
             self.project_filter = ""
         else:
             self.project_filter = self._projects[self._project_idx - 1]
-        self._rebuild_log()
+        if self._is_live_tab():
+            self._rebuild_log()
+        if self._is_stats_tab():
+            self._refresh_stats_tab()
+        self._update_filter_indicators()
 
     def action_cycle_event_type(self) -> None:
         """Cycle event type filter: All → tools → reads → ... → All (Tab 1 only)."""
@@ -1927,9 +2215,7 @@ class ClaudeDashboardApp(App):
         self._rebuild_log()
 
     def action_clear_filters(self) -> None:
-        """Clear all filters and close filter input (Tab 1 only)."""
-        if not self._is_live_tab():
-            return
+        """Clear all filters and close filter input."""
         filter_input = self.query_one("#filter-input", Input)
         filter_input.remove_class("visible")
         filter_input.value = ""
@@ -1939,8 +2225,11 @@ class ClaudeDashboardApp(App):
         self.compact_mode = False
         self._project_idx = 0
         self._event_type_idx = 0
-        self._rebuild_log()
-        self.query_one("#event-log", RichLog).focus()
+        if self._is_live_tab():
+            self._rebuild_log()
+            self.query_one("#event-log", RichLog).focus()
+        if self._is_stats_tab():
+            self._refresh_stats_tab()
 
     def action_scroll_down(self) -> None:
         """Scroll log down, disable live tail (Tab 1 only)."""
