@@ -84,11 +84,26 @@ The dashboard is read-only and monitors these files in `~/.claude/`:
 | `model-stats` | Per-model token breakdown (input, output, cache read/write) |
 | `stats-cache.json` | Historical daily activity, token data, and model usage |
 
+## Supabase Exporter
+
+The `exporter/` directory contains a TypeScript/Bun daemon that syncs the same telemetry to a Supabase database for use in a web dashboard.
+
+```bash
+cd exporter
+cp .env.example .env   # fill in SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY
+bun install
+bun run index.ts              # incremental daemon
+bun run index.ts --backfill   # backfill all history first
+```
+
+It pushes: events, per-project daily metrics (tokens, sessions, messages, tool calls), and live facility status (active agents, per-project agent counts).
+
 ## Requirements
 
 - Python 3.10+
 - macOS (uses `ps` and `lsof` for process detection)
 - [Claude Code](https://claude.ai/code) writing to `~/.claude/`
+- **Exporter only:** [Bun](https://bun.sh/) and a Supabase project
 
 ## License
 
