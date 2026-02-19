@@ -1,0 +1,13 @@
+{
+  "name": "lorf-telemetry-exporter",
+  "version": "1.0.0",
+  "description": "Exports Claude Code telemetry to Supabase for the LORF operations dashboard",
+  "type": "module",
+  "scripts": {
+    "start": "bun run index.ts",
+    "backfill": "bun run index.ts --backfill"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2"
+  }
+}
