@@ -1,5 +1,5 @@
 ---
-title: "Project: Claude Dashboard"
+title: "Claude Dashboard"
 description: "Real-time terminal dashboard and Supabase exporter for monitoring Claude Code activity."
 status: "open"
 classification: "public"
