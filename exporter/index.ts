@@ -27,8 +27,10 @@ import {
   syncDailyMetrics,
   syncProjectDailyMetrics,
   updateFacilityStatus,
+  batchUpsertProjectTelemetry,
   pruneOldEvents,
   type FacilityUpdate,
+  type ProjectTelemetryUpdate,
   type ProjectEventAggregates,
 } from "./sync";
 import {
@@ -104,6 +106,7 @@ async function refreshSlugMap() {
         const sb = getSupabase();
         await sb.from("events").update({ project: slug }).eq("project", oldSlug);
         await sb.from("daily_metrics").update({ project: slug }).eq("project", oldSlug);
+        await sb.from("project_telemetry").update({ project: slug }).eq("project", oldSlug);
         console.log(`  Migrated telemetry data: ${oldSlug} → ${slug}`);
       } catch (err) {
         console.error(`  Error migrating slug ${oldSlug} → ${slug}:`, err);
@@ -130,6 +133,16 @@ function filterAndMapEntries(entries: LogEntry[]): LogEntry[] {
 
 // Cache project token totals for facility status updates
 let cachedTokensByProject: Record<string, number> = {};
+
+// Cache per-project lifetime counters for project_telemetry writes
+let cachedLifetimeCounters: Record<string, {
+  sessions: number; messages: number; toolCalls: number; agentSpawns: number; teamMessages: number;
+}> = {};
+
+// Cache per-project today tokens for project_telemetry writes
+let cachedTodayTokensByProject: Record<string, {
+  total: number; models: Record<string, number>;
+}> = {};
 
 // Cache all seen log entries to avoid re-reading the entire events.log
 let allSeenEntries: LogEntry[] = [];
@@ -170,16 +183,12 @@ async function ensureProjects(entries: LogEntry[]) {
 
 // ─── Compute today's tokens ────────────────────────────────────────────────
 
-function computeTodayTokens(
-  statsCache: ReturnType<typeof readStatsCache>
-): number {
-  if (!statsCache?.dailyModelTokens) return 0;
-
-  const today = new Date().toISOString().split("T")[0];
-  const todayEntry = statsCache.dailyModelTokens.find((d) => d.date === today);
-  if (!todayEntry) return 0;
-
-  return Object.values(todayEntry.tokensByModel).reduce((a, b) => a + b, 0);
+function computeTodayTokens(): number {
+  let total = 0;
+  for (const entry of Object.values(cachedTodayTokensByProject)) {
+    total += entry.total;
+  }
+  return total;
 }
 
 // ─── Compute lifetime tokens from modelUsage ───────────────────────────────
@@ -219,7 +228,7 @@ function aggregateProjectEvents(entries: LogEntry[]): ProjectEventAggregates {
 
     let counts = dateMap.get(date);
     if (!counts) {
-      counts = { sessions: 0, messages: 0, toolCalls: 0, agentSpawns: 0 };
+      counts = { sessions: 0, messages: 0, toolCalls: 0, agentSpawns: 0, teamMessages: 0 };
       dateMap.set(date, counts);
     }
 
@@ -227,6 +236,7 @@ function aggregateProjectEvents(entries: LogEntry[]): ProjectEventAggregates {
     else if (entry.eventType === "response_finish") counts.messages++;
     else if (entry.eventType === "tool") counts.toolCalls++;
     else if (entry.eventType === "agent_spawn") counts.agentSpawns++;
+    else if (entry.eventType === "message") counts.teamMessages++;
   }
 
   return agg;
@@ -287,9 +297,36 @@ async function backfill() {
   const projectSynced = await syncProjectDailyMetrics(projectTokenMap, projectEventAggregates);
   console.log(`  Synced ${projectSynced} per-project daily metric rows`);
 
-  // 7. Update facility status
+  // 7. Populate caches for project_telemetry writes from daily_metrics (authoritative)
+  const { data: lifetimeRows } = await getSupabase()
+    .from("daily_metrics")
+    .select("project, sessions, messages, tool_calls, agent_spawns, team_messages")
+    .not("project", "is", null);
+  if (lifetimeRows) {
+    for (const row of lifetimeRows) {
+      const p = row.project as string;
+      if (!cachedLifetimeCounters[p]) cachedLifetimeCounters[p] = { sessions: 0, messages: 0, toolCalls: 0, agentSpawns: 0, teamMessages: 0 };
+      cachedLifetimeCounters[p].sessions += Number(row.sessions) || 0;
+      cachedLifetimeCounters[p].messages += Number(row.messages) || 0;
+      cachedLifetimeCounters[p].toolCalls += Number(row.tool_calls) || 0;
+      cachedLifetimeCounters[p].agentSpawns += Number(row.agent_spawns) || 0;
+      cachedLifetimeCounters[p].teamMessages += Number(row.team_messages) || 0;
+    }
+  }
+  const today = new Date().toISOString().split("T")[0];
+  for (const [slug, dateMap] of projectTokenMap) {
+    const todayTokens = dateMap.get(today);
+    if (todayTokens) {
+      const total = Object.values(todayTokens).reduce((a, b) => a + b, 0);
+      cachedTodayTokensByProject[slug] = { total, models: todayTokens };
+    }
+  }
+
+  // 8. Update facility status + project_telemetry
   console.log("  Updating facility status...");
   await syncFacilityStatus(statsCache, cachedModelStats);
+
+  pruneSeenEntries();
 
   console.log("Backfill complete.\n");
 }
@@ -358,7 +395,7 @@ async function syncFacilityStatus(
     activeAgents: facility.activeAgents,
     activeProjects: facility.activeProjects,
     tokensLifetime: computeLifetimeTokens(statsCache),
-    tokensToday: computeTodayTokens(statsCache),
+    tokensToday: computeTodayTokens(),
     sessionsLifetime: statsCache?.totalSessions ?? 0,
     messagesLifetime: statsCache?.totalMessages ?? 0,
     modelStats: Object.fromEntries(
@@ -375,11 +412,38 @@ async function syncFacilityStatus(
     ),
     hourDistribution: statsCache?.hourCounts ?? {},
     firstSessionDate: statsCache?.firstSessionDate ?? null,
-    tokensByProject: cachedTokensByProject,
-    agentsByProject,
   };
 
   await updateFacilityStatus(update);
+
+  // Build and write per-project telemetry rows
+  const allSlugs = new Set([
+    ...Object.keys(cachedTokensByProject),
+    ...Object.keys(agentsByProject),
+    ...Object.keys(cachedLifetimeCounters),
+    ...Object.keys(cachedTodayTokensByProject),
+  ]);
+
+  const telemetryUpdates: ProjectTelemetryUpdate[] = [...allSlugs].map((slug) => {
+    const counters = cachedLifetimeCounters[slug] ?? { sessions: 0, messages: 0, toolCalls: 0, agentSpawns: 0, teamMessages: 0 };
+    const todayData = cachedTodayTokensByProject[slug] ?? { total: 0, models: {} };
+    const agents = agentsByProject[slug] ?? { count: 0, active: 0 };
+    return {
+      project: slug,
+      tokensLifetime: cachedTokensByProject[slug] ?? 0,
+      tokensToday: todayData.total,
+      modelsToday: todayData.models,
+      sessionsLifetime: counters.sessions,
+      messagesLifetime: counters.messages,
+      toolCallsLifetime: counters.toolCalls,
+      agentSpawnsLifetime: counters.agentSpawns,
+      teamMessagesLifetime: counters.teamMessages,
+      activeAgents: agents.active,
+      agentCount: agents.count,
+    };
+  });
+
+  await batchUpsertProjectTelemetry(telemetryUpdates);
 
   return facility;
 }
@@ -414,6 +478,37 @@ async function maybeSyncProjectDailyMetrics() {
     cachedTokensByProject = computeTokensByProject(projectTokenMap);
     const projectEventAggregates = aggregateProjectEvents(allSeenEntries);
     await syncProjectDailyMetrics(projectTokenMap, projectEventAggregates);
+
+    // Refresh lifetime counters from daily_metrics (authoritative source)
+    // We query the DB rather than using allSeenEntries because in daemon mode
+    // allSeenEntries only contains events since startup, not the full history.
+    const { data: lifetimeRows } = await getSupabase()
+      .from("daily_metrics")
+      .select("project, sessions, messages, tool_calls, agent_spawns, team_messages")
+      .not("project", "is", null);
+    if (lifetimeRows) {
+      const sums: Record<string, { sessions: number; messages: number; toolCalls: number; agentSpawns: number; teamMessages: number }> = {};
+      for (const row of lifetimeRows) {
+        const p = row.project as string;
+        if (!sums[p]) sums[p] = { sessions: 0, messages: 0, toolCalls: 0, agentSpawns: 0, teamMessages: 0 };
+        sums[p].sessions += Number(row.sessions) || 0;
+        sums[p].messages += Number(row.messages) || 0;
+        sums[p].toolCalls += Number(row.tool_calls) || 0;
+        sums[p].agentSpawns += Number(row.agent_spawns) || 0;
+        sums[p].teamMessages += Number(row.team_messages) || 0;
+      }
+      cachedLifetimeCounters = sums;
+    }
+    for (const [slug, dateMap] of projectTokenMap) {
+      const todayTokens = dateMap.get(today);
+      if (todayTokens) {
+        const total = Object.values(todayTokens).reduce((a, b) => a + b, 0);
+        cachedTodayTokensByProject[slug] = { total, models: todayTokens };
+      } else {
+        cachedTodayTokensByProject[slug] = { total: 0, models: {} };
+      }
+    }
+
     lastProjectSync = today;
   } catch (err) {
     console.error("Error syncing project daily metrics:", err);
@@ -435,6 +530,21 @@ async function maybePruneEvents() {
   }
 }
 
+// ─── Prune in-memory seen entries ───────────────────────────────────────────
+
+function pruneSeenEntries() {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 31);
+  const before = allSeenEntries.length;
+  allSeenEntries = allSeenEntries.filter(
+    (e) => e.parsedTimestamp && e.parsedTimestamp >= cutoff
+  );
+  const pruned = before - allSeenEntries.length;
+  if (pruned > 0) {
+    console.log(`  Pruned ${pruned} in-memory entries older than 31 days`);
+  }
+}
+
 // ─── Main loop ─────────────────────────────────────────────────────────────
 
 async function main() {
@@ -448,16 +558,35 @@ async function main() {
     console.log("Priming log tailer (skipping existing entries)...");
     tailer.readAll(); // Sets offset to end of file
 
-    // Seed token cache from existing facility_status to avoid writing {}
-    console.log("  Loading cached tokens from Supabase...");
-    const { data: facility } = await getSupabase()
-      .from("facility_status")
-      .select("tokens_by_project")
-      .eq("id", 1)
-      .single();
-    if (facility?.tokens_by_project) {
-      cachedTokensByProject = facility.tokens_by_project as Record<string, number>;
-      console.log(`  Loaded ${Object.keys(cachedTokensByProject).length} project token entries`);
+    // Seed caches from project_telemetry to avoid writing zeros on startup
+    console.log("  Loading cached telemetry from Supabase...");
+    const { data: ptRows } = await getSupabase()
+      .from("project_telemetry")
+      .select("project, tokens_lifetime, tokens_today, models_today, sessions_lifetime, messages_lifetime, tool_calls_lifetime, agent_spawns_lifetime, team_messages_lifetime");
+    if (ptRows && ptRows.length > 0) {
+      for (const row of ptRows) {
+        cachedTokensByProject[row.project] = Number(row.tokens_lifetime) || 0;
+        cachedLifetimeCounters[row.project] = {
+          sessions: Number(row.sessions_lifetime) || 0,
+          messages: Number(row.messages_lifetime) || 0,
+          toolCalls: Number(row.tool_calls_lifetime) || 0,
+          agentSpawns: Number(row.agent_spawns_lifetime) || 0,
+          teamMessages: Number(row.team_messages_lifetime) || 0,
+        };
+        const models = (row.models_today && typeof row.models_today === "object")
+          ? row.models_today as Record<string, number>
+          : {};
+        cachedTodayTokensByProject[row.project] = {
+          total: Number(row.tokens_today) || 0,
+          models,
+        };
+      }
+      console.log(`  Loaded ${ptRows.length} project telemetry entries`);
+    }
+
+    // Reset today-specific caches — they may be stale from a previous day
+    for (const key of Object.keys(cachedTodayTokensByProject)) {
+      cachedTodayTokensByProject[key] = { total: 0, models: {} };
     }
 
     console.log("  Ready — will only sync new events from this point.\n");
@@ -482,6 +611,7 @@ async function main() {
           maybeSyncProjectDailyMetrics(),
           maybePruneEvents(),
         ]);
+        pruneSeenEntries();
       }
       cycleCount++;
     } catch (err) {

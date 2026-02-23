@@ -45,6 +45,7 @@ EVENT_STYLES = {
     "🚀": "bold #5fd7d7",
     "🤖": "bold #5fd7d7",
     "👥": "bold #5fd7d7",
+    "💬": "bold #5fd7d7",
 }
 
 # Stable color palette for project names
@@ -141,6 +142,7 @@ def read_model_stats() -> list[dict]:
 EMOJI_COUNT_MAP = {
     "🔧": "tools", "📖": "reads", "🔍": "searches", "🌐": "fetches",
     "🔌": "mcp", "⚡": "skills", "🚀": "agents", "🤖": "subagents",
+    "💬": "messages",
     "🛬": "landed", "🏁": "finished", "📐": "plans", "🟢": "sessions",
     "🔴": "ended", "👋": "input", "🔐": "permission", "❓": "questions",
     "✅": "completed", "⚠️": "compacts",
@@ -385,6 +387,7 @@ class ProjectTokenScanner:
     def _scan_file(self, filepath: str) -> None:
         project = ""
         dates: dict[str, dict[str, dict[str, int]]] = {}
+        seen_request_ids: set[str] = set()
         # Map from JSONL field names to our internal key names
         usage_field_map = {
             "input": "input_tokens",
@@ -407,6 +410,12 @@ class ProjectTokenScanner:
                     usage = msg.get("usage")
                     if not usage or not isinstance(usage, dict):
                         continue
+                    # Deduplicate by requestId (streaming produces multiple lines per request)
+                    req_id = obj.get("requestId", "")
+                    if req_id:
+                        if req_id in seen_request_ids:
+                            continue
+                        seen_request_ids.add(req_id)
                     if not project:
                         cwd = obj.get("cwd", "")
                         if cwd:
@@ -416,6 +425,9 @@ class ProjectTokenScanner:
                         continue
                     date = ts[:10]  # YYYY-MM-DD
                     model = msg.get("model", "unknown")
+                    # Skip synthetic/zero-usage entries
+                    if not any(usage.get(f, 0) for f in usage_field_map.values()):
+                        continue
                     bucket = dates.setdefault(date, {}).setdefault(model, _empty_token_bucket())
                     for key, field in usage_field_map.items():
                         bucket[key] += usage.get(field, 0)
@@ -452,6 +464,33 @@ class ProjectTokenScanner:
         for _fp, (proj, dates) in self._file_data.items():
             if proj != project:
                 continue
+            for date, models in dates.items():
+                if date_filter is not None and date not in date_filter:
+                    continue
+                day_bucket = daily.setdefault(date, {})
+                for model, tokens in models.items():
+                    day_bucket[model] = day_bucket.get(model, 0) + _token_total(tokens)
+        return [{"date": d, "tokensByModel": m} for d, m in sorted(daily.items(), reverse=True)]
+
+    def get_global_totals(self, date_filter: set[str] | None) -> dict[str, dict[str, int]]:
+        """Returns {model: {input, output, cache_read, cache_write, total}} across all projects."""
+        result: dict[str, dict[str, int]] = {}
+        for _fp, (_proj, dates) in self._file_data.items():
+            for date, models in dates.items():
+                if date_filter is not None and date not in date_filter:
+                    continue
+                for model, tokens in models.items():
+                    if model not in result:
+                        result[model] = {**_empty_token_bucket(), "total": 0}
+                    for key in _TOKEN_KEYS:
+                        result[model][key] += tokens[key]
+                    result[model]["total"] += _token_total(tokens)
+        return result
+
+    def get_global_daily(self, date_filter: set[str] | None) -> list[dict]:
+        """Returns [{date, tokensByModel: {model: total}}] across all projects."""
+        daily: dict[str, dict[str, int]] = {}
+        for _fp, (_proj, dates) in self._file_data.items():
             for date, models in dates.items():
                 if date_filter is not None and date not in date_filter:
                     continue
@@ -1166,12 +1205,12 @@ class ClaudeDashboardApp(App):
         self.query_one("#event-log", RichLog).focus()
         self.run_worker(self._initial_project_scan)
 
-        # Timers: poll + sidebar at 0.5s, header at 1s, processes at 3s, stats cache at 30s, project scan at 30s
+        # Timers: poll + sidebar at 0.5s, header at 1s, processes at 3s, stats+scan at 5s
         self.set_interval(0.5, self._poll_new_entries)
         self.set_interval(0.5, self._update_sidebar)
         self.set_interval(1.0, self._update_header)
         self.set_interval(3.0, self._poll_processes)
-        self.set_interval(30.0, self._reload_stats_cache)
+        self.set_interval(5.0, self._reload_stats_cache)
 
     async def _initial_project_scan(self) -> None:
         self._project_token_scanner.scan_incremental()
@@ -1393,6 +1432,7 @@ class ClaudeDashboardApp(App):
         table.add_row("⚡ Skill use", str(counts["skills"]))
         table.add_row("🚀 Agent spawn", str(counts["agents"]))
         table.add_row("🤖 Agent task", str(counts["subagents"]))
+        table.add_row("💬 Message", str(counts["messages"]))
         table.add_row("🛬 Agent finished", str(counts["landed"]))
         table.add_row("🏁 Finished responding", str(counts["finished"]))
         table.add_row("📐 Plan mode", str(counts["plans"]))
@@ -1487,23 +1527,12 @@ class ClaudeDashboardApp(App):
                 models.append((model_id, inp + out + cache_read + cache_write, cache_read, out))
             self._add_model_rows(table, models, empty_label="[dim]Waiting...[/]")
         else:
-            # Today / 7d — aggregate dailyModelTokens + live model-stats
-            daily_model = self._stats_cache.get("dailyModelTokens", [])
-            today_str = datetime.now().strftime("%Y-%m-%d")
-
-            model_totals_map: dict[str, int] = {}
-            for day in daily_model:
-                if day.get("date", "") in date_filter:
-                    for model_id, tokens in day.get("tokensByModel", {}).items():
-                        model_totals_map[model_id] = model_totals_map.get(model_id, 0) + tokens
-
-            if today_str in date_filter and self._is_cache_stale_for_today():
-                for m in read_model_stats():
-                    mid = m["model"]
-                    model_totals_map[mid] = model_totals_map.get(mid, 0) + m["total"]
-
-            # No cache breakdown available for daily aggregates
-            models = [(mid, total, 0, 0) for mid, total in model_totals_map.items()]
+            # Today / 7d — use JSONL scanner for accurate daily totals
+            model_totals = self._project_token_scanner.get_global_totals(date_filter)
+            models = [
+                (mid, t["total"], t["cache_read"], t["output"])
+                for mid, t in model_totals.items()
+            ]
             self._add_model_rows(table, models)
 
         self.query_one("#token-panel", Static).update(table)
@@ -1949,62 +1978,54 @@ class ClaudeDashboardApp(App):
             self._update_daily_tokens_table_project()
             return
 
-        daily_model = data.get("dailyModelTokens", [])
         daily_activity = data.get("dailyActivity", [])
-        # Check if live data might be available even if cache is empty
-        has_live = self._is_cache_stale_for_today() and read_model_stats()
-        if not daily_model and not has_live:
-            self.query_one("#stats-daily-tokens", Static).update(
-                Text("  No daily token data available", style="dim")
-            )
-            return
 
         # Build activity lookup for messages/sessions
         activity_map: dict[str, dict] = {}
         for d in daily_activity:
             activity_map[d.get("date", "")] = d
 
-        # Collect all models seen across all days
-        all_models: set[str] = set()
-        for day in daily_model:
-            all_models.update(day.get("tokensByModel", {}).keys())
-        model_list = sorted(all_models)
-
         # Filter by current time range
         rng = self._stats_time_range
         title_label = TIME_RANGE_LABELS.get(rng, rng)
-        filtered = self._filter_daily_by_range(daily_model)
-
-        # Supplement with live data for today if cache is stale
-        today_str = datetime.now().strftime("%Y-%m-%d")
         date_filter = self._get_daily_token_dates()
-        if date_filter is None or today_str in date_filter:
-            if self._is_cache_stale_for_today():
-                live_models = read_model_stats()
-                if live_models:
-                    # Find or create today's entry
-                    today_entry = None
-                    for d in filtered:
-                        if d.get("date") == today_str:
-                            today_entry = d
-                            break
-                    if today_entry is None:
-                        today_entry = {"date": today_str, "tokensByModel": {}}
-                        filtered.append(today_entry)
-                    for m in live_models:
-                        mid = m["model"]
-                        today_entry["tokensByModel"][mid] = today_entry["tokensByModel"].get(mid, 0) + m["total"]
-                        all_models.add(mid)
-                    model_list = sorted(all_models)
+        today_str = datetime.now().strftime("%Y-%m-%d")
 
-                # Also add live activity data for today
-                live_sessions, live_messages = self._count_live_today_activity()
-                if live_sessions > 0 or live_messages > 0:
-                    act = activity_map.get(today_str, {})
-                    act["messageCount"] = act.get("messageCount", 0) + live_messages
-                    act["sessionCount"] = act.get("sessionCount", 0) + live_sessions
-                    act["date"] = today_str
-                    activity_map[today_str] = act
+        if date_filter is not None:
+            # Today / 7d — use JSONL scanner for accurate daily totals
+            filtered = self._project_token_scanner.get_global_daily(date_filter)
+        else:
+            # All Time — use stats-cache's dailyModelTokens, supplement today from scanner
+            daily_model = data.get("dailyModelTokens", [])
+            filtered = self._filter_daily_by_range(daily_model)
+            if self._is_cache_stale_for_today():
+                scanner_today = self._project_token_scanner.get_global_daily({today_str})
+                if scanner_today:
+                    # Replace or add today's entry with scanner data
+                    filtered = [d for d in filtered if d.get("date") != today_str]
+                    filtered.extend(scanner_today)
+
+        if not filtered:
+            self.query_one("#stats-daily-tokens", Static).update(
+                Text("  No daily token data available", style="dim")
+            )
+            return
+
+        # Collect all models seen across all days
+        all_models: set[str] = set()
+        for day in filtered:
+            all_models.update(day.get("tokensByModel", {}).keys())
+        model_list = sorted(all_models)
+
+        # Supplement live activity data for today
+        if date_filter is None or today_str in date_filter:
+            live_sessions, live_messages = self._count_live_today_activity()
+            if live_sessions > 0 or live_messages > 0:
+                act = activity_map.get(today_str, {})
+                act["messageCount"] = act.get("messageCount", 0) + live_messages
+                act["sessionCount"] = act.get("sessionCount", 0) + live_sessions
+                act["date"] = today_str
+                activity_map[today_str] = act
 
         filtered.sort(key=lambda d: d.get("date", ""), reverse=True)
 

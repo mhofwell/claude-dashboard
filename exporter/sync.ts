@@ -159,10 +159,10 @@ export async function insertEvents(entries: LogEntry[]) {
 
 // ─── Per-project event aggregation type ───────────────────────────────────
 
-/** project → date → { sessions, messages, toolCalls, agentSpawns } */
+/** project → date → { sessions, messages, toolCalls, agentSpawns, teamMessages } */
 export type ProjectEventAggregates = Map<
   string,
-  Map<string, { sessions: number; messages: number; toolCalls: number; agentSpawns: number }>
+  Map<string, { sessions: number; messages: number; toolCalls: number; agentSpawns: number; teamMessages: number }>
 >;
 
 // ─── Daily Metrics ─────────────────────────────────────────────────────────
@@ -253,7 +253,7 @@ export async function syncProjectDailyMetrics(
   eventAggregates?: ProjectEventAggregates
 ) {
   // Build a unified set of (project, date) keys from both sources
-  const keys = new Map<string, { tokens?: Record<string, number>; events?: { sessions: number; messages: number; toolCalls: number; agentSpawns: number } }>();
+  const keys = new Map<string, { tokens?: Record<string, number>; events?: { sessions: number; messages: number; toolCalls: number; agentSpawns: number; teamMessages: number } }>();
 
   const makeKey = (project: string, date: string) => `${project}\0${date}`;
 
@@ -315,6 +315,7 @@ export async function syncProjectDailyMetrics(
         updates.messages = row.events.messages;
         updates.tool_calls = row.events.toolCalls;
         updates.agent_spawns = row.events.agentSpawns;
+        updates.team_messages = row.events.teamMessages;
       }
       if (Object.keys(updates).length > 0) {
         toUpdate.push({ id: existing.id, data: updates });
@@ -324,10 +325,11 @@ export async function syncProjectDailyMetrics(
         date: row.date,
         project: row.project,
         tokens: row.tokens ?? null,
-        sessions: row.events?.sessions ?? null,
-        messages: row.events?.messages ?? null,
-        tool_calls: row.events?.toolCalls ?? null,
-        agent_spawns: row.events?.agentSpawns ?? null,
+        sessions: row.events?.sessions ?? 0,
+        messages: row.events?.messages ?? 0,
+        tool_calls: row.events?.toolCalls ?? 0,
+        agent_spawns: row.events?.agentSpawns ?? 0,
+        team_messages: row.events?.teamMessages ?? 0,
       });
     }
   }
@@ -369,8 +371,6 @@ export interface FacilityUpdate {
   modelStats: Record<string, any>;
   hourDistribution: Record<string, number>;
   firstSessionDate: string | null;
-  tokensByProject: Record<string, number>;
-  agentsByProject: Record<string, { count: number; active: number }>;
 }
 
 /**
@@ -390,8 +390,6 @@ export async function updateFacilityStatus(update: FacilityUpdate) {
       model_stats: update.modelStats,
       hour_distribution: update.hourDistribution,
       first_session_date: update.firstSessionDate,
-      tokens_by_project: update.tokensByProject,
-      agents_by_project: update.agentsByProject,
       updated_at: new Date().toISOString(),
     })
     .eq("id", 1);
@@ -399,6 +397,44 @@ export async function updateFacilityStatus(update: FacilityUpdate) {
   if (error) {
     console.error("Error updating facility status:", error.message);
   }
+}
+
+// ─── Project Telemetry ──────────────────────────────────────────────────────
+
+export interface ProjectTelemetryUpdate {
+  project: string;
+  tokensLifetime: number;
+  tokensToday: number;
+  modelsToday: Record<string, number>;
+  sessionsLifetime: number;
+  messagesLifetime: number;
+  toolCallsLifetime: number;
+  agentSpawnsLifetime: number;
+  teamMessagesLifetime: number;
+  activeAgents: number;
+  agentCount: number;
+}
+
+export async function batchUpsertProjectTelemetry(updates: ProjectTelemetryUpdate[]) {
+  if (updates.length === 0) return;
+  const rows = updates.map((u) => ({
+    project: u.project,
+    tokens_lifetime: u.tokensLifetime,
+    tokens_today: u.tokensToday,
+    models_today: u.modelsToday,
+    sessions_lifetime: u.sessionsLifetime,
+    messages_lifetime: u.messagesLifetime,
+    tool_calls_lifetime: u.toolCallsLifetime,
+    agent_spawns_lifetime: u.agentSpawnsLifetime,
+    team_messages_lifetime: u.teamMessagesLifetime,
+    active_agents: u.activeAgents,
+    agent_count: u.agentCount,
+    updated_at: new Date().toISOString(),
+  }));
+  const { error } = await supabase
+    .from("project_telemetry")
+    .upsert(rows, { onConflict: "project" });
+  if (error) console.error("Error batch upserting project_telemetry:", error.message);
 }
 
 // ─── Event Pruning ──────────────────────────────────────────────────────────

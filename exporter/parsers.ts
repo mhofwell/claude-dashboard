@@ -44,6 +44,7 @@ const EMOJI_TYPE_MAP: Record<string, string> = {
   "✅": "completed",
   "⚠️": "compact",
   "📋": "task",
+  "💬": "message",
 };
 
 // Ordered for priority matching (check more specific emojis first)
