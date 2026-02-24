@@ -5,6 +5,7 @@
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { LogEntry, StatsCache } from "./parsers";
+import type { ProcessDiff } from "./process-watcher";
 import type { ProjectTokenMap } from "./project-scanner";
 
 let supabase: SupabaseClient;
@@ -380,7 +381,7 @@ export async function updateFacilityStatus(update: FacilityUpdate) {
   const { error } = await supabase
     .from("facility_status")
     .update({
-      status: update.status,
+      // NOTE: status is NOT written here — it's owned by the manual switch (lorf-open/lorf-close)
       active_agents: update.activeAgents,
       active_projects: update.activeProjects,
       tokens_lifetime: update.tokensLifetime,
@@ -396,6 +397,60 @@ export async function updateFacilityStatus(update: FacilityUpdate) {
 
   if (error) {
     console.error("Error updating facility status:", error.message);
+  }
+}
+
+// ─── Facility Switch (manual open/close) ─────────────────────────────────────
+
+/**
+ * Set the facility open/close status.
+ * Only called by lorf-open/lorf-close commands and the auto-close timer.
+ */
+export async function setFacilitySwitch(status: "active" | "dormant") {
+  const { error } = await supabase
+    .from("facility_status")
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq("id", 1);
+
+  if (error) {
+    console.error("Error setting facility switch:", error.message);
+  }
+}
+
+// ─── Facility Metrics (aggregate only) ──────────────────────────────────────
+
+export interface FacilityMetricsUpdate {
+  tokensLifetime: number;
+  tokensToday: number;
+  sessionsLifetime: number;
+  messagesLifetime: number;
+  modelStats: Record<string, any>;
+  hourDistribution: Record<string, number>;
+  firstSessionDate: string | null;
+}
+
+/**
+ * Update aggregate metrics on facility_status.
+ * Does NOT write agent fields (status, active_agents, active_projects) —
+ * those are owned by the ProcessWatcher via pushAgentState().
+ */
+export async function updateFacilityMetrics(update: FacilityMetricsUpdate) {
+  const { error } = await supabase
+    .from("facility_status")
+    .update({
+      tokens_lifetime: update.tokensLifetime,
+      tokens_today: update.tokensToday,
+      sessions_lifetime: update.sessionsLifetime,
+      messages_lifetime: update.messagesLifetime,
+      model_stats: update.modelStats,
+      hour_distribution: update.hourDistribution,
+      first_session_date: update.firstSessionDate,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", 1);
+
+  if (error) {
+    console.error("Error updating facility metrics:", error.message);
   }
 }
 
@@ -415,26 +470,50 @@ export interface ProjectTelemetryUpdate {
   agentCount: number;
 }
 
-export async function batchUpsertProjectTelemetry(updates: ProjectTelemetryUpdate[]) {
+export async function batchUpsertProjectTelemetry(updates: ProjectTelemetryUpdate[], options: { skipAgentFields?: boolean } = {}) {
   if (updates.length === 0) return;
-  const rows = updates.map((u) => ({
-    project: u.project,
-    tokens_lifetime: u.tokensLifetime,
-    tokens_today: u.tokensToday,
-    models_today: u.modelsToday,
-    sessions_lifetime: u.sessionsLifetime,
-    messages_lifetime: u.messagesLifetime,
-    tool_calls_lifetime: u.toolCallsLifetime,
-    agent_spawns_lifetime: u.agentSpawnsLifetime,
-    team_messages_lifetime: u.teamMessagesLifetime,
-    active_agents: u.activeAgents,
-    agent_count: u.agentCount,
-    updated_at: new Date().toISOString(),
-  }));
+  const now = new Date().toISOString();
+  const toRow = (u: ProjectTelemetryUpdate) => {
+    const row: Record<string, any> = {
+      project: u.project,
+      tokens_lifetime: u.tokensLifetime,
+      tokens_today: u.tokensToday,
+      models_today: u.modelsToday,
+      sessions_lifetime: u.sessionsLifetime,
+      messages_lifetime: u.messagesLifetime,
+      tool_calls_lifetime: u.toolCallsLifetime,
+      agent_spawns_lifetime: u.agentSpawnsLifetime,
+      team_messages_lifetime: u.teamMessagesLifetime,
+      updated_at: now,
+    };
+    if (!options.skipAgentFields) {
+      row.active_agents = u.activeAgents;
+      row.agent_count = u.agentCount;
+    }
+    return row;
+  };
+
+  // Try batch first (fast path)
+  const rows = updates.map(toRow);
   const { error } = await supabase
     .from("project_telemetry")
     .upsert(rows, { onConflict: "project" });
-  if (error) console.error("Error batch upserting project_telemetry:", error.message);
+
+  if (!error) return;
+
+  // Batch failed (likely FK violation) — fall back to per-row upserts
+  let succeeded = 0;
+  for (const update of updates) {
+    const { error: rowError } = await supabase
+      .from("project_telemetry")
+      .upsert(toRow(update), { onConflict: "project" });
+    if (rowError) {
+      console.error(`  project_telemetry: skipping ${update.project} (${rowError.message})`);
+    } else {
+      succeeded++;
+    }
+  }
+  console.log(`  project_telemetry: ${succeeded}/${updates.length} rows updated (batch fallback)`);
 }
 
 // ─── Event Pruning ──────────────────────────────────────────────────────────
@@ -458,4 +537,63 @@ export async function pruneOldEvents(retentionDays = 14) {
   }
 
   return count ?? 0;
+}
+
+// ─── Agent State Push (Process Watcher) ─────────────────────────────────────
+
+/**
+ * Push agent state changes from the ProcessWatcher.
+ * Only writes agent-related fields — never touches aggregate metrics.
+ * All writes fire in parallel for minimum latency.
+ */
+export async function pushAgentState(diff: ProcessDiff) {
+  const now = new Date().toISOString();
+
+  // Write per-project agent counts
+  const projectWrites = [...diff.byProject.entries()].map(([slug, counts]) =>
+    supabase
+      .from("project_telemetry")
+      .update({
+        active_agents: counts.active,
+        agent_count: counts.count,
+        updated_at: now,
+      })
+      .eq("project", slug)
+  );
+
+  // Write facility agent fields (NOT status — that's owned by the manual switch)
+  const facilityWrite = supabase
+    .from("facility_status")
+    .update({
+      active_agents: diff.facility.activeAgents,
+      active_projects: diff.facility.activeProjects,
+      updated_at: now,
+    })
+    .eq("id", 1);
+
+  // Update last_active for projects with active agents
+  const activeSlugs = [...diff.byProject.entries()]
+    .filter(([, counts]) => counts.active > 0)
+    .map(([slug]) => slug);
+
+  const activityWrites = activeSlugs.map((slug) =>
+    supabase
+      .from("projects")
+      .update({ last_active: now })
+      .eq("content_slug", slug)
+  );
+
+  // Fire all writes in parallel
+  const results = await Promise.all([
+    ...projectWrites,
+    facilityWrite,
+    ...activityWrites,
+  ]);
+
+  // Log any errors
+  for (const result of results) {
+    if (result.error) {
+      console.error("  pushAgentState error:", result.error.message);
+    }
+  }
 }

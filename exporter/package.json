@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "start": "bun run index.ts",
-    "backfill": "bun run index.ts --backfill"
+    "backfill": "bun run index.ts --backfill",
+    "open": "bun run facility-switch.ts open",
+    "close": "bun run facility-switch.ts close"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2"
