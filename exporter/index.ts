@@ -317,14 +317,7 @@ async function backfill() {
       cachedLifetimeCounters[p].teamMessages += Number(row.team_messages) || 0;
     }
   }
-  const today = new Date().toISOString().split("T")[0];
-  for (const [slug, dateMap] of projectTokenMap) {
-    const todayTokens = dateMap.get(today);
-    if (todayTokens) {
-      const total = Object.values(todayTokens).reduce((a, b) => a + b, 0);
-      cachedTodayTokensByProject[slug] = { total, models: todayTokens };
-    }
-  }
+  refreshTodayTokensCache(projectTokenMap, new Date().toISOString().split("T")[0]);
 
   // 8. Update facility status + project_telemetry
   console.log("  Updating facility status...");
@@ -561,19 +554,35 @@ async function maybeSyncProjectDailyMetrics() {
       }
       cachedLifetimeCounters = sums;
     }
-    for (const [slug, dateMap] of projectTokenMap) {
-      const todayTokens = dateMap.get(today);
-      if (todayTokens) {
-        const total = Object.values(todayTokens).reduce((a, b) => a + b, 0);
-        cachedTodayTokensByProject[slug] = { total, models: todayTokens };
-      } else {
-        cachedTodayTokensByProject[slug] = { total: 0, models: {} };
-      }
-    }
+    refreshTodayTokensCache(projectTokenMap, today);
 
     lastProjectSync = today;
   } catch (err) {
     console.error("Error syncing project daily metrics:", err);
+  }
+}
+
+/**
+ * Re-scan JSONL files and refresh cachedTodayTokensByProject.
+ * Runs on the 5-minute cycle so today's token counts stay current
+ * throughout the day (not just on first sync).
+ */
+function refreshTodayTokensFromDisk() {
+  const today = new Date().toISOString().split("T")[0];
+  const projectTokenMap = scanProjectTokens();
+  cachedTokensByProject = computeTokensByProject(projectTokenMap);
+  refreshTodayTokensCache(projectTokenMap, today);
+}
+
+function refreshTodayTokensCache(projectTokenMap: ReturnType<typeof scanProjectTokens>, today: string) {
+  for (const [slug, dateMap] of projectTokenMap) {
+    const todayTokens = dateMap.get(today);
+    if (todayTokens) {
+      const total = Object.values(todayTokens).reduce((a, b) => a + b, 0);
+      cachedTodayTokensByProject[slug] = { total, models: todayTokens };
+    } else {
+      cachedTodayTokensByProject[slug] = { total: 0, models: {} };
+    }
   }
 }
 
@@ -733,16 +742,7 @@ async function gapBackfill(allEntries: LogEntry[]) {
     }
     cachedLifetimeCounters = sums;
   }
-  const today = new Date().toISOString().split("T")[0];
-  for (const [slug, dateMap] of projectTokenMap) {
-    const todayTokens = dateMap.get(today);
-    if (todayTokens) {
-      const total = Object.values(todayTokens).reduce((a, b) => a + b, 0);
-      cachedTodayTokensByProject[slug] = { total, models: todayTokens };
-    } else {
-      cachedTodayTokensByProject[slug] = { total: 0, models: {} };
-    }
-  }
+  refreshTodayTokensCache(projectTokenMap, new Date().toISOString().split("T")[0]);
 
   // Update facility status with fresh data
   await syncFacilityStatus(statsCache, cachedModelStats);
@@ -849,6 +849,7 @@ async function main() {
         if (cycleCount % 60 === 0 && cycleCount > 0) {
           const statsCache = readStatsCache();
           await refreshSlugMap();
+          refreshTodayTokensFromDisk();
           await Promise.all([
             maybeSyncDailyMetrics(statsCache),
             maybeSyncProjectDailyMetrics(),
