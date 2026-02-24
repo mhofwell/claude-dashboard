@@ -302,21 +302,7 @@ async function backfill() {
   console.log(`  Synced ${projectSynced} per-project daily metric rows`);
 
   // 7. Populate caches for project_telemetry writes from daily_metrics (authoritative)
-  const { data: lifetimeRows } = await getSupabase()
-    .from("daily_metrics")
-    .select("project, sessions, messages, tool_calls, agent_spawns, team_messages")
-    .not("project", "is", null);
-  if (lifetimeRows) {
-    for (const row of lifetimeRows) {
-      const p = row.project as string;
-      if (!cachedLifetimeCounters[p]) cachedLifetimeCounters[p] = { sessions: 0, messages: 0, toolCalls: 0, agentSpawns: 0, teamMessages: 0 };
-      cachedLifetimeCounters[p].sessions += Number(row.sessions) || 0;
-      cachedLifetimeCounters[p].messages += Number(row.messages) || 0;
-      cachedLifetimeCounters[p].toolCalls += Number(row.tool_calls) || 0;
-      cachedLifetimeCounters[p].agentSpawns += Number(row.agent_spawns) || 0;
-      cachedLifetimeCounters[p].teamMessages += Number(row.team_messages) || 0;
-    }
-  }
+  await refreshLifetimeCountersFromDb();
   refreshTodayTokensCache(projectTokenMap, new Date().toISOString().split("T")[0]);
 
   // 8. Update facility status + project_telemetry
@@ -534,26 +520,7 @@ async function maybeSyncProjectDailyMetrics() {
     const projectEventAggregates = aggregateProjectEvents(allSeenEntries);
     await syncProjectDailyMetrics(projectTokenMap, projectEventAggregates);
 
-    // Refresh lifetime counters from daily_metrics (authoritative source)
-    // We query the DB rather than using allSeenEntries because in daemon mode
-    // allSeenEntries only contains events since startup, not the full history.
-    const { data: lifetimeRows } = await getSupabase()
-      .from("daily_metrics")
-      .select("project, sessions, messages, tool_calls, agent_spawns, team_messages")
-      .not("project", "is", null);
-    if (lifetimeRows) {
-      const sums: Record<string, { sessions: number; messages: number; toolCalls: number; agentSpawns: number; teamMessages: number }> = {};
-      for (const row of lifetimeRows) {
-        const p = row.project as string;
-        if (!sums[p]) sums[p] = { sessions: 0, messages: 0, toolCalls: 0, agentSpawns: 0, teamMessages: 0 };
-        sums[p].sessions += Number(row.sessions) || 0;
-        sums[p].messages += Number(row.messages) || 0;
-        sums[p].toolCalls += Number(row.tool_calls) || 0;
-        sums[p].agentSpawns += Number(row.agent_spawns) || 0;
-        sums[p].teamMessages += Number(row.team_messages) || 0;
-      }
-      cachedLifetimeCounters = sums;
-    }
+    await refreshLifetimeCountersFromDb();
     refreshTodayTokensCache(projectTokenMap, today);
 
     lastProjectSync = today;
@@ -563,15 +530,41 @@ async function maybeSyncProjectDailyMetrics() {
 }
 
 /**
- * Re-scan JSONL files and refresh cachedTodayTokensByProject.
- * Runs on the 5-minute cycle so today's token counts stay current
- * throughout the day (not just on first sync).
+ * Refresh lifetime counters (sessions, messages, tool_calls, etc.)
+ * from daily_metrics in Supabase. This is the authoritative source
+ * because in daemon mode allSeenEntries only contains events since startup.
  */
-function refreshTodayTokensFromDisk() {
+async function refreshLifetimeCountersFromDb() {
+  const { data: lifetimeRows } = await getSupabase()
+    .from("daily_metrics")
+    .select("project, sessions, messages, tool_calls, agent_spawns, team_messages")
+    .not("project", "is", null);
+  if (lifetimeRows) {
+    const sums: Record<string, { sessions: number; messages: number; toolCalls: number; agentSpawns: number; teamMessages: number }> = {};
+    for (const row of lifetimeRows) {
+      const p = row.project as string;
+      if (!sums[p]) sums[p] = { sessions: 0, messages: 0, toolCalls: 0, agentSpawns: 0, teamMessages: 0 };
+      sums[p].sessions += Number(row.sessions) || 0;
+      sums[p].messages += Number(row.messages) || 0;
+      sums[p].toolCalls += Number(row.tool_calls) || 0;
+      sums[p].agentSpawns += Number(row.agent_spawns) || 0;
+      sums[p].teamMessages += Number(row.team_messages) || 0;
+    }
+    cachedLifetimeCounters = sums;
+  }
+}
+
+/**
+ * Re-scan JSONL files and refresh all per-project caches.
+ * Runs on the 5-minute cycle so token counts and lifetime counters
+ * stay current throughout the day.
+ */
+async function refreshProjectCachesFromDisk() {
   const today = new Date().toISOString().split("T")[0];
   const projectTokenMap = scanProjectTokens();
   cachedTokensByProject = computeTokensByProject(projectTokenMap);
   refreshTodayTokensCache(projectTokenMap, today);
+  await refreshLifetimeCountersFromDb();
 }
 
 function refreshTodayTokensCache(projectTokenMap: ReturnType<typeof scanProjectTokens>, today: string) {
@@ -707,41 +700,7 @@ async function gapBackfill(allEntries: LogEntry[]) {
   );
 
   // Populate caches from daily_metrics (authoritative)
-  const { data: lifetimeRows } = await getSupabase()
-    .from("daily_metrics")
-    .select(
-      "project, sessions, messages, tool_calls, agent_spawns, team_messages"
-    )
-    .not("project", "is", null);
-  if (lifetimeRows) {
-    const sums: Record<
-      string,
-      {
-        sessions: number;
-        messages: number;
-        toolCalls: number;
-        agentSpawns: number;
-        teamMessages: number;
-      }
-    > = {};
-    for (const row of lifetimeRows) {
-      const p = row.project as string;
-      if (!sums[p])
-        sums[p] = {
-          sessions: 0,
-          messages: 0,
-          toolCalls: 0,
-          agentSpawns: 0,
-          teamMessages: 0,
-        };
-      sums[p].sessions += Number(row.sessions) || 0;
-      sums[p].messages += Number(row.messages) || 0;
-      sums[p].toolCalls += Number(row.tool_calls) || 0;
-      sums[p].agentSpawns += Number(row.agent_spawns) || 0;
-      sums[p].teamMessages += Number(row.team_messages) || 0;
-    }
-    cachedLifetimeCounters = sums;
-  }
+  await refreshLifetimeCountersFromDb();
   refreshTodayTokensCache(projectTokenMap, new Date().toISOString().split("T")[0]);
 
   // Update facility status with fresh data
@@ -849,7 +808,7 @@ async function main() {
         if (cycleCount % 60 === 0 && cycleCount > 0) {
           const statsCache = readStatsCache();
           await refreshSlugMap();
-          refreshTodayTokensFromDisk();
+          await refreshProjectCachesFromDisk();
           await Promise.all([
             maybeSyncDailyMetrics(statsCache),
             maybeSyncProjectDailyMetrics(),
