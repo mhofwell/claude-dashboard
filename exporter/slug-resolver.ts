@@ -34,19 +34,13 @@ function parseFrontmatter(content: string): Record<string, string> {
 
 /**
  * Resolve a project directory path to its content_slug.
- * Returns null if the project is not a LORF project (no .lorf/ directory).
- *
- * 1. Check in-memory cache
- * 2. Check for .lorf/ directory existence
- * 3. Try reading {projectDir}/.lorf/project.md
- * 4. Parse YAML frontmatter
- * 5. Return content_slug ?? slug ?? basename(projectDir)
- * 6. Cache result
+ * Returns null if the project has no .lorf/ directory (opt-in signal).
+ * When .lorf/ is added later, the exporter picks it up on the next slug map
+ * refresh and retroactively backfills all historical telemetry from JSONL.
  */
 export function resolveSlug(projectDir: string): string | null {
   if (cache.has(projectDir)) return cache.get(projectDir)!;
 
-  // Only track LORF projects — those with a .lorf/ directory
   const lorfDir = join(projectDir, ".lorf");
   if (!existsSync(lorfDir)) {
     cache.set(projectDir, null);
@@ -59,7 +53,7 @@ export function resolveSlug(projectDir: string): string | null {
     const lorfPath = join(lorfDir, "project.md");
     const content = readFileSync(lorfPath, "utf-8");
     const fm = parseFrontmatter(content);
-    slug = fm.content_slug ?? fm.slug ?? basename(projectDir);
+    slug = fm.content_slug ?? fm.slug ?? slug;
   } catch {
     // .lorf/ exists but no project.md — use directory basename
   }

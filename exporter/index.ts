@@ -26,6 +26,7 @@ import {
   insertEvents,
   syncDailyMetrics,
   syncProjectDailyMetrics,
+  deleteProjectDailyMetrics,
   updateFacilityStatus,
   batchUpsertProjectTelemetry,
   pruneOldEvents,
@@ -43,7 +44,7 @@ import {
   getVisibility,
 } from "./visibility-cache";
 import { buildSlugMap, clearSlugCache } from "./slug-resolver";
-import { readFileSync, writeFileSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, unlinkSync } from "fs";
 import { join, dirname } from "path";
 
 // ─── Config ────────────────────────────────────────────────────────────────
@@ -57,6 +58,38 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.error("Copy .env.example to .env and fill in your credentials.");
   process.exit(1);
 }
+
+// ─── Single-instance guard (PID file) ───────────────────────────────────────
+
+const PID_FILE = join(dirname(new URL(import.meta.url).pathname), ".exporter.pid");
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0); // signal 0 = check existence
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+if (existsSync(PID_FILE)) {
+  const existingPid = parseInt(readFileSync(PID_FILE, "utf-8").trim(), 10);
+  if (!isNaN(existingPid) && isProcessRunning(existingPid) && existingPid !== process.pid) {
+    console.error(`Another exporter is already running (PID ${existingPid}).`);
+    console.error(`If this is stale, remove ${PID_FILE} and retry.`);
+    process.exit(1);
+  }
+}
+
+writeFileSync(PID_FILE, String(process.pid));
+
+// Clean up PID file on exit
+function removePidFile() {
+  try { unlinkSync(PID_FILE); } catch {}
+}
+process.on("exit", removePidFile);
+process.on("SIGINT", () => { removePidFile(); process.exit(0); });
+process.on("SIGTERM", () => { removePidFile(); process.exit(0); });
 
 // ─── Init ──────────────────────────────────────────────────────────────────
 
@@ -75,7 +108,7 @@ const tailer = new LogTailer();
 // Track projects we've already ensured exist in the DB (by slug)
 const knownProjects = new Set<string>();
 
-// Directory name → slug mapping, refreshed every 10 cycles
+// Directory name → slug mapping, refreshed every 60 cycles
 let slugMap: Map<string, string> = new Map();
 
 const SLUG_MAPPING_FILE = join(dirname(new URL(import.meta.url).pathname), ".slug-mapping.json");
@@ -185,7 +218,7 @@ async function ensureProjects(entries: LogEntry[]) {
   }
 }
 
-// ─── Compute today's tokens ────────────────────────────────────────────────
+// ─── Compute facility-wide totals from per-project caches ──────────────────
 
 function computeTodayTokens(): number {
   let total = 0;
@@ -195,20 +228,15 @@ function computeTodayTokens(): number {
   return total;
 }
 
-// ─── Compute lifetime tokens from modelUsage ───────────────────────────────
-
-function computeLifetimeTokens(
-  statsCache: ReturnType<typeof readStatsCache>
-): number {
-  if (!statsCache?.modelUsage) return 0;
+function computeLifetimeSessions(): number {
   let total = 0;
-  for (const model of Object.values(statsCache.modelUsage)) {
-    total +=
-      (model.inputTokens ?? 0) +
-      (model.outputTokens ?? 0) +
-      (model.cacheReadInputTokens ?? 0) +
-      (model.cacheCreationInputTokens ?? 0);
-  }
+  for (const c of Object.values(cachedLifetimeCounters)) total += c.sessions;
+  return total;
+}
+
+function computeLifetimeMessages(): number {
+  let total = 0;
+  for (const c of Object.values(cachedLifetimeCounters)) total += c.messages;
   return total;
 }
 
@@ -246,6 +274,73 @@ function aggregateProjectEvents(entries: LogEntry[]): ProjectEventAggregates {
   return agg;
 }
 
+// ─── Shared helpers ─────────────────────────────────────────────────────────
+
+/** Build a slug → latest-timestamp map from entries whose project field is already a slug */
+function computeSlugLastActive(entries: LogEntry[]): Record<string, Date> {
+  const slugLastActive: Record<string, Date> = {};
+  for (const entry of entries) {
+    if (!entry.project || !entry.parsedTimestamp) continue;
+    if (!slugLastActive[entry.project] || entry.parsedTimestamp > slugLastActive[entry.project]) {
+      slugLastActive[entry.project] = entry.parsedTimestamp;
+    }
+  }
+  return slugLastActive;
+}
+
+/** Format model stats array into the JSON shape expected by facility_status / facility_metrics */
+function formatModelStats(modelStats: ReturnType<typeof readModelStats>): Record<string, object> {
+  return Object.fromEntries(
+    modelStats.map((m) => [
+      m.model,
+      {
+        total: m.total,
+        input: m.input,
+        cacheWrite: m.cacheWrite,
+        cacheRead: m.cacheRead,
+        output: m.output,
+      },
+    ])
+  );
+}
+
+/**
+ * Build ProjectTelemetryUpdate[] from cached data.
+ * When agentsByProject is provided, agent counts come from it;
+ * otherwise activeAgents and agentCount default to 0.
+ */
+function buildProjectTelemetryUpdates(
+  agentsByProject?: Record<string, { count: number; active: number }>
+): ProjectTelemetryUpdate[] {
+  const allSlugs = new Set([
+    ...Object.keys(cachedTokensByProject),
+    ...(agentsByProject ? Object.keys(agentsByProject) : []),
+    ...Object.keys(cachedLifetimeCounters),
+    ...Object.keys(cachedTodayTokensByProject),
+  ]);
+
+  return [...allSlugs].map((slug) => {
+    const counters = cachedLifetimeCounters[slug] ?? {
+      sessions: 0, messages: 0, toolCalls: 0, agentSpawns: 0, teamMessages: 0,
+    };
+    const todayData = cachedTodayTokensByProject[slug] ?? { total: 0, models: {} };
+    const agents = agentsByProject?.[slug] ?? { count: 0, active: 0 };
+    return {
+      project: slug,
+      tokensLifetime: cachedTokensByProject[slug] ?? 0,
+      tokensToday: todayData.total,
+      modelsToday: todayData.models,
+      sessionsLifetime: counters.sessions,
+      messagesLifetime: counters.messages,
+      toolCallsLifetime: counters.toolCalls,
+      agentSpawnsLifetime: counters.agentSpawns,
+      teamMessagesLifetime: counters.teamMessages,
+      activeAgents: agents.active,
+      agentCount: agents.count,
+    };
+  });
+}
+
 // ─── Backfill ──────────────────────────────────────────────────────────────
 
 async function backfill() {
@@ -272,13 +367,7 @@ async function backfill() {
 
   // 4. Update project activity counts (insertedByProject keys are already slugs from lorfEntries)
   console.log("  Updating project activity...");
-  const slugLastActive: Record<string, Date> = {};
-  for (const entry of lorfEntries) {
-    if (!entry.project || !entry.parsedTimestamp) continue;
-    if (!slugLastActive[entry.project] || entry.parsedTimestamp > slugLastActive[entry.project]) {
-      slugLastActive[entry.project] = entry.parsedTimestamp;
-    }
-  }
+  const slugLastActive = computeSlugLastActive(lorfEntries);
   for (const [slug, count] of Object.entries(insertedByProject)) {
     const lastActive = slugLastActive[slug] ?? new Date();
     await updateProjectActivity(slug, count, lastActive);
@@ -293,7 +382,12 @@ async function backfill() {
     console.log(`  Synced ${synced} daily metric rows`);
   }
 
-  // 6. Scan and sync per-project token metrics + event counts from JSONL files
+  // 6. Delete stale per-project daily_metrics before recomputing
+  console.log("  Cleansing stale per-project daily_metrics...");
+  const deletedRows = await deleteProjectDailyMetrics();
+  console.log(`  Deleted ${deletedRows} stale per-project daily_metrics rows`);
+
+  // 7. Scan and sync per-project token metrics + event counts from JSONL files
   console.log("  Scanning JSONL files for per-project tokens...");
   const projectTokenMap = scanProjectTokens();
   cachedTokensByProject = computeTokensByProject(projectTokenMap);
@@ -301,13 +395,38 @@ async function backfill() {
   const projectSynced = await syncProjectDailyMetrics(projectTokenMap, projectEventAggregates);
   console.log(`  Synced ${projectSynced} per-project daily metric rows`);
 
-  // 7. Populate caches for project_telemetry writes from daily_metrics (authoritative)
+  // 8. Populate caches for project_telemetry writes from daily_metrics (authoritative)
   await refreshLifetimeCountersFromDb();
   refreshTodayTokensCache(projectTokenMap, new Date().toISOString().split("T")[0]);
 
-  // 8. Update facility status + project_telemetry
+  // 9. Update facility status + project_telemetry
   console.log("  Updating facility status...");
   await syncFacilityStatus(statsCache, cachedModelStats);
+
+  // 10. Verify backfill writes persisted — refresh caches from DB
+  console.log("  Verifying backfill writes...");
+  const { data: verifyRows } = await getSupabase()
+    .from("project_telemetry")
+    .select("project, tokens_lifetime");
+  if (verifyRows) {
+    const fmt = (n: number) => (n / 1e6).toFixed(1) + "M";
+    for (const row of verifyRows) {
+      const slug = row.project as string;
+      const dbTokens = Number(row.tokens_lifetime);
+      const expected = cachedTokensByProject[slug] ?? 0;
+      if (dbTokens !== expected) {
+        console.warn(
+          `  WARN: ${slug} — cache has ${fmt(expected)} but DB has ${fmt(dbTokens)}`
+        );
+      }
+      // Refresh cache from DB (belt-and-suspenders)
+      cachedTokensByProject[slug] = dbTokens;
+    }
+    console.log(
+      `  Verified ${verifyRows.length} project_telemetry rows:`,
+      verifyRows.map((r) => `${r.project}: ${fmt(Number(r.tokens_lifetime))}`).join(", ")
+    );
+  }
 
   pruneSeenEntries();
 
@@ -334,13 +453,7 @@ async function incrementalSync() {
     }
 
     // Update project activity (insertedByProject keys are already slugs from lorfEntries)
-    const slugLastActive: Record<string, Date> = {};
-    for (const entry of lorfEntries) {
-      if (!entry.project || !entry.parsedTimestamp) continue;
-      if (!slugLastActive[entry.project] || entry.parsedTimestamp > slugLastActive[entry.project]) {
-        slugLastActive[entry.project] = entry.parsedTimestamp;
-      }
-    }
+    const slugLastActive = computeSlugLastActive(lorfEntries);
     for (const [slug, count] of Object.entries(insertedByProject)) {
       const lastActive = slugLastActive[slug] ?? new Date();
       await updateProjectActivity(slug, count, lastActive);
@@ -376,56 +489,19 @@ async function syncFacilityStatus(
     status: facility.status,
     activeAgents: facility.activeAgents,
     activeProjects: facility.activeProjects,
-    tokensLifetime: computeLifetimeTokens(statsCache),
+    tokensLifetime: Object.values(cachedTokensByProject).reduce((a, b) => a + b, 0),
     tokensToday: computeTodayTokens(),
-    sessionsLifetime: statsCache?.totalSessions ?? 0,
-    messagesLifetime: statsCache?.totalMessages ?? 0,
-    modelStats: Object.fromEntries(
-      modelStats.map((m) => [
-        m.model,
-        {
-          total: m.total,
-          input: m.input,
-          cacheWrite: m.cacheWrite,
-          cacheRead: m.cacheRead,
-          output: m.output,
-        },
-      ])
-    ),
+    sessionsLifetime: computeLifetimeSessions(),
+    messagesLifetime: computeLifetimeMessages(),
+    modelStats: formatModelStats(modelStats),
     hourDistribution: statsCache?.hourCounts ?? {},
     firstSessionDate: statsCache?.firstSessionDate ?? null,
   };
 
   await updateFacilityStatus(update);
 
-  // Build and write per-project telemetry rows
-  const allSlugs = new Set([
-    ...Object.keys(cachedTokensByProject),
-    ...Object.keys(agentsByProject),
-    ...Object.keys(cachedLifetimeCounters),
-    ...Object.keys(cachedTodayTokensByProject),
-  ]);
-
-  const telemetryUpdates: ProjectTelemetryUpdate[] = [...allSlugs].map((slug) => {
-    const counters = cachedLifetimeCounters[slug] ?? { sessions: 0, messages: 0, toolCalls: 0, agentSpawns: 0, teamMessages: 0 };
-    const todayData = cachedTodayTokensByProject[slug] ?? { total: 0, models: {} };
-    const agents = agentsByProject[slug] ?? { count: 0, active: 0 };
-    return {
-      project: slug,
-      tokensLifetime: cachedTokensByProject[slug] ?? 0,
-      tokensToday: todayData.total,
-      modelsToday: todayData.models,
-      sessionsLifetime: counters.sessions,
-      messagesLifetime: counters.messages,
-      toolCallsLifetime: counters.toolCalls,
-      agentSpawnsLifetime: counters.agentSpawns,
-      teamMessagesLifetime: counters.teamMessages,
-      activeAgents: agents.active,
-      agentCount: agents.count,
-    };
-  });
-
-  await batchUpsertProjectTelemetry(telemetryUpdates);
+  // Build and write per-project telemetry rows (with live agent counts)
+  await batchUpsertProjectTelemetry(buildProjectTelemetryUpdates(agentsByProject));
 
   return facility;
 }
@@ -437,56 +513,19 @@ async function syncAggregateMetrics(
   modelStats: ReturnType<typeof readModelStats>
 ) {
   const metricsUpdate: FacilityMetricsUpdate = {
-    tokensLifetime: computeLifetimeTokens(statsCache),
+    tokensLifetime: Object.values(cachedTokensByProject).reduce((a, b) => a + b, 0),
     tokensToday: computeTodayTokens(),
-    sessionsLifetime: statsCache?.totalSessions ?? 0,
-    messagesLifetime: statsCache?.totalMessages ?? 0,
-    modelStats: Object.fromEntries(
-      modelStats.map((m) => [
-        m.model,
-        {
-          total: m.total,
-          input: m.input,
-          cacheWrite: m.cacheWrite,
-          cacheRead: m.cacheRead,
-          output: m.output,
-        },
-      ])
-    ),
+    sessionsLifetime: computeLifetimeSessions(),
+    messagesLifetime: computeLifetimeMessages(),
+    modelStats: formatModelStats(modelStats),
     hourDistribution: statsCache?.hourCounts ?? {},
     firstSessionDate: statsCache?.firstSessionDate ?? null,
   };
 
   await updateFacilityMetrics(metricsUpdate);
 
-  // Build per-project telemetry (aggregate fields only — skip agent fields)
-  const allSlugs = new Set([
-    ...Object.keys(cachedTokensByProject),
-    ...Object.keys(cachedLifetimeCounters),
-    ...Object.keys(cachedTodayTokensByProject),
-  ]);
-
-  const telemetryUpdates: ProjectTelemetryUpdate[] = [...allSlugs].map((slug) => {
-    const counters = cachedLifetimeCounters[slug] ?? {
-      sessions: 0, messages: 0, toolCalls: 0, agentSpawns: 0, teamMessages: 0,
-    };
-    const todayData = cachedTodayTokensByProject[slug] ?? { total: 0, models: {} };
-    return {
-      project: slug,
-      tokensLifetime: cachedTokensByProject[slug] ?? 0,
-      tokensToday: todayData.total,
-      modelsToday: todayData.models,
-      sessionsLifetime: counters.sessions,
-      messagesLifetime: counters.messages,
-      toolCallsLifetime: counters.toolCalls,
-      agentSpawnsLifetime: counters.agentSpawns,
-      teamMessagesLifetime: counters.teamMessages,
-      activeAgents: 0,
-      agentCount: 0,
-    };
-  });
-
-  await batchUpsertProjectTelemetry(telemetryUpdates, { skipAgentFields: true });
+  // Build per-project telemetry (aggregate fields only — no agentsByProject, skip agent fields)
+  await batchUpsertProjectTelemetry(buildProjectTelemetryUpdates(), { skipAgentFields: true });
 }
 
 // ─── Periodic daily metrics sync ───────────────────────────────────────────
@@ -660,16 +699,7 @@ async function gapBackfill(allEntries: LogEntry[]) {
     );
 
     // Update project activity
-    const slugLastActive: Record<string, Date> = {};
-    for (const entry of lorfEntries) {
-      if (!entry.project || !entry.parsedTimestamp) continue;
-      if (
-        !slugLastActive[entry.project] ||
-        entry.parsedTimestamp > slugLastActive[entry.project]
-      ) {
-        slugLastActive[entry.project] = entry.parsedTimestamp;
-      }
-    }
+    const slugLastActive = computeSlugLastActive(lorfEntries);
     for (const [slug, count] of Object.entries(insertedByProject)) {
       const lastActive = slugLastActive[slug] ?? new Date();
       await updateProjectActivity(slug, count, lastActive);

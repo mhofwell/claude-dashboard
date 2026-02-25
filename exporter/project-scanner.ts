@@ -2,12 +2,17 @@
  * JSONL session scanner for per-project token aggregation.
  * Reads session JSONL files from ~/.claude/projects/ and aggregates
  * token usage by project, date, and model.
+ *
+ * IMPORTANT: Only processes directories whose encoded CWD starts with a known
+ * org root prefix + "-". This prevents:
+ *   1. Parent CWD misattribution (org root without trailing repo name)
+ *   2. Duplicate counting from dirs outside the org root that resolve to the
+ *      same slug (e.g. projects/nexus vs projects/looselyorganized/nexus)
  */
 
 import { readdirSync, readFileSync, statSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { deriveProjectName } from "./process-scanner";
 import { resolveSlug } from "./slug-resolver";
 
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
@@ -17,23 +22,17 @@ const PROJECTS_DIR = join(homedir(), ".claude", "projects");
 // project -> date -> { model: totalTokens }
 export type ProjectTokenMap = Map<string, Map<string, Record<string, number>>>;
 
-// ─── CWD → project name mapping ────────────────────────────────────────────
-
-/**
- * Decode the directory name format used under ~/.claude/projects/.
- * e.g. "-Users-bigviking-Documents-github-projects-claude-dashboard"
- * becomes "/Users/bigviking/Documents/github/projects/claude-dashboard"
- */
-function decodeDirName(dirName: string): string {
-  if (dirName === "-") return "/";
-  // Replace leading dash with /, then remaining dashes with /
-  // But we need to be careful: the format replaces / with -
-  return dirName.replace(/^-/, "/").replace(/-/g, "/");
-}
-
-// ─── Filesystem-aware project name resolution ───────────────────────────────
+// ─── Strict org-root allowlist ──────────────────────────────────────────────
 
 const PROJECT_ROOT = "/Users/bigviking/Documents/github/projects/looselyorganized";
+
+/**
+ * All known org root paths whose repos should be scanned.
+ * The same physical repos may appear under multiple encoded CWD prefixes
+ * (e.g. after a directory rename or symlink). We pick ONE canonical prefix
+ * to avoid double-counting.
+ */
+const CANONICAL_ENCODED_ROOT = PROJECT_ROOT.replace(/\//g, "-");
 
 let cachedProjectDirs: string[] | null = null;
 
@@ -54,33 +53,35 @@ function getProjectDirs(): string[] {
 /**
  * Resolve an encoded ~/.claude/projects/ directory name to a project name.
  *
- * Matches the remainder after the known project root against actual directory
- * names on disk (longest first). Case-insensitive because macOS HFS+/APFS is.
- * Falls back to deriveProjectName() for paths outside known roots.
+ * STRICT: Only matches directories under the canonical org root prefix.
+ * Returns null for:
+ *   - The org root itself (parent CWD — no trailing repo name)
+ *   - Directories outside the org root (prevents duplicate counting)
+ *   - Directories that don't match any repo on disk
  */
-export function resolveProjectName(encodedDirName: string): string {
+export function resolveProjectName(encodedDirName: string): string | null {
   const actualDirs = getProjectDirs();
-  const encodedRoot = PROJECT_ROOT.replace(/\//g, "-"); // -Users-bigviking-Documents-github-projects
   const lowerEncoded = encodedDirName.toLowerCase();
-  const lowerRoot = encodedRoot.toLowerCase();
+  const lowerRoot = CANONICAL_ENCODED_ROOT.toLowerCase();
 
-  if (lowerEncoded.startsWith(lowerRoot + "-")) {
-    const remainder = encodedDirName.slice(encodedRoot.length + 1);
-    const lowerRemainder = remainder.toLowerCase();
-
-    for (const dir of actualDirs) {
-      const lowerDir = dir.toLowerCase();
-      if (lowerRemainder === lowerDir || lowerRemainder.startsWith(lowerDir + "-")) {
-        return dir;
-      }
-    }
-
-    // No match on disk — fall back to first hyphen-separated segment
-    return remainder.split("-")[0] || "unknown";
+  // Must start with the canonical root + "-" (repo name follows the dash)
+  if (!lowerEncoded.startsWith(lowerRoot + "-")) {
+    return null; // Not under the canonical org root — skip entirely
   }
 
-  // Not under the known project root — use legacy logic
-  return deriveProjectName(decodeDirName(encodedDirName));
+  const remainder = encodedDirName.slice(CANONICAL_ENCODED_ROOT.length + 1);
+  const lowerRemainder = remainder.toLowerCase();
+
+  // Match remainder against actual repo directories on disk (longest first)
+  for (const dir of actualDirs) {
+    const lowerDir = dir.toLowerCase();
+    if (lowerRemainder === lowerDir || lowerRemainder.startsWith(lowerDir + "-")) {
+      return dir;
+    }
+  }
+
+  // No match on disk — skip (don't fall back to fuzzy resolution)
+  return null;
 }
 
 // ─── JSONL scanner ──────────────────────────────────────────────────────────
@@ -107,6 +108,12 @@ export function scanProjectTokens(): ProjectTokenMap {
   let totalFiles = 0;
   let totalRecords = 0;
   let skippedFiles = 0;
+  let skippedDirs = 0;
+  let dedupedFiles = 0;
+
+  // Track seen JSONL filenames per slug to prevent double-counting
+  // when the same session file appears under multiple directory paths
+  const seenFilesBySlug = new Map<string, Set<string>>();
 
   for (const dirName of projectDirs) {
     const dirPath = join(PROJECTS_DIR, dirName);
@@ -119,12 +126,23 @@ export function scanProjectTokens(): ProjectTokenMap {
     }
     if (!stat.isDirectory()) continue;
 
-    // Resolve project name using filesystem-aware matching, then map to slug
+    // Strict: only process dirs under the canonical org root
     const projectName = resolveProjectName(dirName);
+    if (!projectName) {
+      skippedDirs++;
+      continue;
+    }
+
     const projectSlug = resolveSlug(join(PROJECT_ROOT, projectName));
 
     // Skip non-LORF projects
     if (!projectSlug) continue;
+
+    // Initialize dedup set for this slug
+    if (!seenFilesBySlug.has(projectSlug)) {
+      seenFilesBySlug.set(projectSlug, new Set());
+    }
+    const seenFiles = seenFilesBySlug.get(projectSlug)!;
 
     // Find all .jsonl files in this project dir
     let files: string[];
@@ -135,6 +153,13 @@ export function scanProjectTokens(): ProjectTokenMap {
     }
 
     for (const file of files) {
+      // File-level dedup: skip if we've already counted this session file for this slug
+      if (seenFiles.has(file)) {
+        dedupedFiles++;
+        continue;
+      }
+      seenFiles.add(file);
+
       totalFiles++;
       const filePath = join(dirPath, file);
 
@@ -200,7 +225,9 @@ export function scanProjectTokens(): ProjectTokenMap {
 
   console.log(
     `  Scanned ${totalFiles} JSONL files, ${totalRecords} usage records` +
-      (skippedFiles > 0 ? `, ${skippedFiles} skipped` : "")
+      (skippedDirs > 0 ? `, ${skippedDirs} dirs skipped (non-org-root)` : "") +
+      (dedupedFiles > 0 ? `, ${dedupedFiles} deduped` : "") +
+      (skippedFiles > 0 ? `, ${skippedFiles} errors` : "")
   );
 
   return result;

@@ -4,9 +4,25 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import type { LogEntry, StatsCache } from "./parsers";
+import type { LogEntry, ModelStats, StatsCache } from "./parsers";
 import type { ProcessDiff } from "./process-watcher";
 import type { ProjectTokenMap } from "./project-scanner";
+
+// ─── Shared types ─────────────────────────────────────────────────────────
+
+/** Token breakdown per model, keyed by model name. */
+type ModelTokenBreakdown = Record<string, Omit<ModelStats, "model">>;
+
+/** Aggregate metrics shared by FacilityUpdate and FacilityMetricsUpdate. */
+interface FacilityMetrics {
+  tokensLifetime: number;
+  tokensToday: number;
+  sessionsLifetime: number;
+  messagesLifetime: number;
+  modelStats: ModelTokenBreakdown;
+  hourDistribution: Record<string, number>;
+  firstSessionDate: string | null;
+}
 
 let supabase: SupabaseClient;
 
@@ -303,13 +319,33 @@ export async function syncProjectDailyMetrics(
   }
 
   // Split into updates vs inserts
-  const toInsert: Array<Record<string, any>> = [];
-  const toUpdate: Array<{ id: number; data: Record<string, any> }> = [];
+  interface ProjectDailyMetricsInsert {
+    date: string;
+    project: string;
+    tokens: Record<string, number> | null;
+    sessions: number;
+    messages: number;
+    tool_calls: number;
+    agent_spawns: number;
+    team_messages: number;
+  }
+
+  interface ProjectDailyMetricsPartial {
+    tokens?: Record<string, number>;
+    sessions?: number;
+    messages?: number;
+    tool_calls?: number;
+    agent_spawns?: number;
+    team_messages?: number;
+  }
+
+  const toInsert: ProjectDailyMetricsInsert[] = [];
+  const toUpdate: Array<{ id: number; data: ProjectDailyMetricsPartial }> = [];
 
   for (const row of allRows) {
     const existing = existingByKey.get(makeKey(row.project, row.date));
     if (existing) {
-      const updates: Record<string, any> = {};
+      const updates: ProjectDailyMetricsPartial = {};
       if (row.tokens) updates.tokens = row.tokens;
       if (row.events) {
         updates.sessions = row.events.sessions;
@@ -361,17 +397,10 @@ export async function syncProjectDailyMetrics(
 
 // ─── Facility Status ───────────────────────────────────────────────────────
 
-export interface FacilityUpdate {
+export interface FacilityUpdate extends FacilityMetrics {
   status: "active" | "dormant";
   activeAgents: number;
   activeProjects: Array<{ name: string; active: boolean }>;
-  tokensLifetime: number;
-  tokensToday: number;
-  sessionsLifetime: number;
-  messagesLifetime: number;
-  modelStats: Record<string, any>;
-  hourDistribution: Record<string, number>;
-  firstSessionDate: string | null;
 }
 
 /**
@@ -419,15 +448,7 @@ export async function setFacilitySwitch(status: "active" | "dormant") {
 
 // ─── Facility Metrics (aggregate only) ──────────────────────────────────────
 
-export interface FacilityMetricsUpdate {
-  tokensLifetime: number;
-  tokensToday: number;
-  sessionsLifetime: number;
-  messagesLifetime: number;
-  modelStats: Record<string, any>;
-  hourDistribution: Record<string, number>;
-  firstSessionDate: string | null;
-}
+export interface FacilityMetricsUpdate extends FacilityMetrics {}
 
 /**
  * Update aggregate metrics on facility_status.
@@ -470,11 +491,26 @@ export interface ProjectTelemetryUpdate {
   agentCount: number;
 }
 
+interface ProjectTelemetryRow {
+  project: string;
+  tokens_lifetime: number;
+  tokens_today: number;
+  models_today: Record<string, number>;
+  sessions_lifetime: number;
+  messages_lifetime: number;
+  tool_calls_lifetime: number;
+  agent_spawns_lifetime: number;
+  team_messages_lifetime: number;
+  updated_at: string;
+  active_agents?: number;
+  agent_count?: number;
+}
+
 export async function batchUpsertProjectTelemetry(updates: ProjectTelemetryUpdate[], options: { skipAgentFields?: boolean } = {}) {
   if (updates.length === 0) return;
   const now = new Date().toISOString();
-  const toRow = (u: ProjectTelemetryUpdate) => {
-    const row: Record<string, any> = {
+  const toRow = (u: ProjectTelemetryUpdate): ProjectTelemetryRow => {
+    const row: ProjectTelemetryRow = {
       project: u.project,
       tokens_lifetime: u.tokensLifetime,
       tokens_today: u.tokensToday,
@@ -493,27 +529,78 @@ export async function batchUpsertProjectTelemetry(updates: ProjectTelemetryUpdat
     return row;
   };
 
+  // Log what we're about to write
+  const fmt = (n: number) => (n / 1e6).toFixed(1) + "M";
+  console.log(
+    `  project_telemetry: writing ${updates.length} rows —`,
+    updates.map((u) => `${u.project}: ${fmt(u.tokensLifetime)}`).join(", ")
+  );
+
   // Try batch first (fast path)
   const rows = updates.map(toRow);
   const { error } = await supabase
     .from("project_telemetry")
     .upsert(rows, { onConflict: "project" });
 
-  if (!error) return;
+  if (error) {
+    // Batch failed (likely FK violation) — fall back to per-row upserts
+    console.error(`  project_telemetry: batch upsert failed (${error.message}), falling back to per-row`);
+    let succeeded = 0;
+    for (const update of updates) {
+      const { error: rowError } = await supabase
+        .from("project_telemetry")
+        .upsert(toRow(update), { onConflict: "project" });
+      if (rowError) {
+        console.error(`  project_telemetry: skipping ${update.project} (${rowError.message})`);
+      } else {
+        succeeded++;
+      }
+    }
+    console.log(`  project_telemetry: ${succeeded}/${updates.length} rows updated (batch fallback)`);
+  }
 
-  // Batch failed (likely FK violation) — fall back to per-row upserts
-  let succeeded = 0;
-  for (const update of updates) {
-    const { error: rowError } = await supabase
-      .from("project_telemetry")
-      .upsert(toRow(update), { onConflict: "project" });
-    if (rowError) {
-      console.error(`  project_telemetry: skipping ${update.project} (${rowError.message})`);
-    } else {
-      succeeded++;
+  // Verify: read back and compare tokens_lifetime
+  const { data: verify } = await supabase
+    .from("project_telemetry")
+    .select("project, tokens_lifetime");
+
+  if (verify) {
+    const dbValues = new Map(verify.map((r) => [r.project as string, Number(r.tokens_lifetime)]));
+    let mismatches = 0;
+    for (const u of updates) {
+      const dbVal = dbValues.get(u.project);
+      if (dbVal !== undefined && dbVal !== u.tokensLifetime) {
+        console.error(
+          `  project_telemetry MISMATCH: ${u.project} — wrote ${fmt(u.tokensLifetime)} but DB has ${fmt(dbVal)}`
+        );
+        mismatches++;
+      }
+    }
+    if (mismatches === 0) {
+      console.log(`  project_telemetry: verified ${updates.length} rows match DB`);
     }
   }
-  console.log(`  project_telemetry: ${succeeded}/${updates.length} rows updated (batch fallback)`);
+}
+
+// ─── Pre-backfill Cleanse ────────────────────────────────────────────────────
+
+/**
+ * Delete all per-project daily_metrics rows.
+ * Used before backfill to ensure stale inflated rows don't persist.
+ * Global rows (project IS NULL) are left untouched.
+ */
+export async function deleteProjectDailyMetrics(): Promise<number> {
+  const { count, error } = await supabase
+    .from("daily_metrics")
+    .delete({ count: "exact" })
+    .not("project", "is", null);
+
+  if (error) {
+    console.error("Error deleting per-project daily_metrics:", error.message);
+    return 0;
+  }
+
+  return count ?? 0;
 }
 
 // ─── Event Pruning ──────────────────────────────────────────────────────────
