@@ -250,13 +250,114 @@ async function checkSite(): Promise<void> {
 }
 
 async function checkLaunchd(): Promise<void> {
-  // Task 5
-  throw new Error("Not implemented");
+  // 1. Ensure plist symlink exists
+  if (!existsSync(PLIST_DEST)) {
+    if (!existsSync(PLIST_SOURCE)) {
+      fail("Launchd", "Plist file missing from exporter directory");
+      abort(
+        `Expected ${PLIST_SOURCE}`,
+        "The launchd plist was deleted. Recreate it or restore from git."
+      );
+    }
+    try {
+      symlinkSync(PLIST_SOURCE, PLIST_DEST);
+      pass("Launchd", `Symlink created → ${PLIST_DEST}`);
+    } catch (err: any) {
+      fail("Launchd", `Could not create symlink: ${err.message}`);
+      abort(`Failed to symlink plist to LaunchAgents.`);
+    }
+  }
+
+  // 2. Check if service is loaded
+  try {
+    const result = await $`launchctl list`.quiet();
+    const output = result.stdout.toString();
+    const isLoaded = output.includes("com.lorf.telemetry-exporter");
+
+    if (isLoaded) {
+      pass("Launchd", "Service loaded (com.lorf.telemetry-exporter)");
+      return;
+    }
+  } catch {
+    // launchctl list failed entirely — unusual
+  }
+
+  // 3. Not loaded — load it
+  try {
+    await $`launchctl load ${PLIST_DEST}`.quiet();
+    pass("Launchd", "Service loaded (was not loaded, loaded now)");
+  } catch (err: any) {
+    const stderr = err.stderr?.toString?.() ?? "";
+    if (stderr.includes("service already loaded")) {
+      pass("Launchd", "Service loaded (already loaded)");
+    } else {
+      fail("Launchd", `launchctl load failed`);
+      abort(
+        `launchctl load returned: ${stderr.trim() || err.message}`,
+        "Try manually: launchctl load ~/Library/LaunchAgents/com.lorf.telemetry-exporter.plist"
+      );
+    }
+  }
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function checkExporter(): Promise<number> {
-  // Task 5
-  throw new Error("Not implemented");
+  // Check PID file
+  if (existsSync(PID_FILE)) {
+    const pidStr = readFileSync(PID_FILE, "utf-8").trim();
+    const pid = parseInt(pidStr, 10);
+    if (!isNaN(pid) && isProcessRunning(pid)) {
+      pass("Exporter", `Running (PID ${pid})`);
+      return pid;
+    }
+    // Stale PID file — clean it up
+    try {
+      const { unlinkSync } = await import("fs");
+      unlinkSync(PID_FILE);
+    } catch {}
+  }
+
+  // Not running — wait for launchd to spawn it (we just loaded the service)
+  const MAX_WAIT = 5_000;
+  const POLL_INTERVAL = 500;
+  let waited = 0;
+
+  while (waited < MAX_WAIT) {
+    await Bun.sleep(POLL_INTERVAL);
+    waited += POLL_INTERVAL;
+
+    if (existsSync(PID_FILE)) {
+      const pidStr = readFileSync(PID_FILE, "utf-8").trim();
+      const pid = parseInt(pidStr, 10);
+      if (!isNaN(pid) && isProcessRunning(pid)) {
+        pass("Exporter", `Running (PID ${pid}, started after ${waited}ms)`);
+        return pid;
+      }
+    }
+  }
+
+  // Still not running after waiting
+  fail("Exporter", "Not running after 5s wait");
+  const errTail = readErrLogTail(10);
+  console.log();
+  console.log(`  ${DIM}── Last 10 lines of ${ERR_LOG} ──${RESET}`);
+  for (const line of errTail.split("\n")) {
+    console.log(`  ${DIM}${line}${RESET}`);
+  }
+  abort(
+    "Exporter did not start. Check error log above.",
+    `Log: ${ERR_LOG}`
+  );
+
+  return -1; // unreachable (abort exits)
 }
 
 async function checkTelemetry(supabase: SupabaseClient): Promise<{ updatedAt: string; activeAgents: number; agentCount: number }> {
