@@ -97,13 +97,81 @@ function readErrLogTail(lines = 10): string {
 // These are filled in by subsequent tasks — this is the skeleton.
 
 async function checkEnvironment(): Promise<{ url: string; key: string }> {
-  // Task 2
-  throw new Error("Not implemented");
+  if (!existsSync(ENV_FILE)) {
+    fail("Environment", ".env file not found");
+    abort(
+      `Expected .env at ${ENV_FILE}`,
+      "Copy .env.example to .env and fill in your Supabase credentials."
+    );
+  }
+
+  // Load .env manually (bun auto-loads .env in cwd, but we may not be in exporter dir)
+  const envContent = readFileSync(ENV_FILE, "utf-8");
+  for (const line of envContent.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx === -1) continue;
+    const k = trimmed.slice(0, eqIdx).trim();
+    const v = trimmed.slice(eqIdx + 1).trim();
+    if (!process.env[k]) process.env[k] = v;
+  }
+
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SECRET_KEY;
+
+  if (!url || !key) {
+    fail("Environment", "Missing SUPABASE_URL or SUPABASE_SECRET_KEY");
+    abort(
+      "Required environment variables are not set in .env",
+      "Check .env.example for the required variables."
+    );
+  }
+
+  pass("Environment", ".env loaded, credentials present");
+  return { url: url!, key: key! };
 }
 
 async function checkSupabase(url: string, key: string): Promise<SupabaseClient> {
-  // Task 3
-  throw new Error("Not implemented");
+  const supabase = createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  const start = Date.now();
+  const { data, error } = await supabase
+    .from("facility_status")
+    .select("id, status, active_agents")
+    .eq("id", 1)
+    .single();
+  const latency = Date.now() - start;
+
+  if (error) {
+    fail("Supabase", `Connection failed (${error.message})`);
+    if (error.message.includes("401") || error.message.includes("403")) {
+      abort(
+        "Supabase credentials are invalid or expired.",
+        "Check SUPABASE_SECRET_KEY in .env"
+      );
+    }
+    abort(
+      `Supabase returned: ${error.message}`,
+      "Check https://status.supabase.com or verify SUPABASE_URL in .env"
+    );
+  }
+
+  if (!data) {
+    fail("Supabase", "No facility_status row found");
+    abort("facility_status table is empty (expected row id=1).");
+  }
+
+  // If already open and we want to be idempotent, note it
+  if (data.status === "active") {
+    pass("Supabase", `Connected (${latency}ms) — facility already active`);
+  } else {
+    pass("Supabase", `Connected (${latency}ms)`);
+  }
+
+  return supabase;
 }
 
 async function checkRailway(): Promise<void> {
