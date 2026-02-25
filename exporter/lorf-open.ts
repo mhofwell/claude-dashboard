@@ -28,7 +28,6 @@ const PLIST_DEST = join(
 );
 const ERR_LOG = join(process.env.HOME!, ".claude/lorf-exporter.err");
 const SITE_URL = "https://looselyorganized.org";
-const SITE_REPO_DIR = join(EXPORTER_DIR, "../../looselyorganized");
 
 // ─── Visual Output ──────────────────────────────────────────────────────────
 
@@ -174,51 +173,39 @@ async function checkSupabase(url: string, key: string): Promise<SupabaseClient> 
   return supabase;
 }
 
-async function checkRailway(): Promise<void> {
-  // Check if railway CLI exists
+async function checkDeployment(): Promise<void> {
   try {
-    await $`command -v railway`.quiet();
-  } catch {
-    warn("Railway", "CLI not installed — skipping deployment check");
-    return;
-  }
+    const start = Date.now();
+    const response = await fetch(`${SITE_URL}/api/health`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    const latency = Date.now() - start;
 
-  try {
-    const result = await $`cd ${SITE_REPO_DIR} && railway status --json`
-      .quiet()
-      .timeout(10_000);
-    const status = JSON.parse(result.stdout.toString());
-
-    // Find the service instance and its latest deployment
-    const env = status.environments?.edges?.[0]?.node;
-    const service = env?.serviceInstances?.edges?.[0]?.node;
-    const deployment = service?.latestDeployment;
-
-    if (!deployment) {
-      warn("Railway", "No deployment found — skipping");
-      return;
-    }
-
-    const deployStatus = deployment.status as string;
-    const createdAt = new Date(deployment.createdAt as string);
-    const agoMs = Date.now() - createdAt.getTime();
-    const agoHours = Math.round(agoMs / 3_600_000);
-    const agoStr = agoHours < 1 ? `${Math.round(agoMs / 60_000)}m ago` : `${agoHours}h ago`;
-
-    if (deployStatus === "SUCCESS") {
-      pass("Railway", `${service.serviceName} deployed (${deployStatus}, ${agoStr})`);
-    } else if (deployStatus === "BUILDING" || deployStatus === "DEPLOYING") {
-      warn("Railway", `${service.serviceName} ${deployStatus.toLowerCase()} (started ${agoStr}) — previous deployment still serves`);
+    if (response.ok) {
+      try {
+        const body = await response.json() as Record<string, unknown>;
+        const details = [
+          `${latency}ms`,
+          body.version ? `v${body.version}` : null,
+          body.uptime ? `up ${body.uptime}` : null,
+        ].filter(Boolean).join(", ");
+        pass("Deployment", details);
+      } catch {
+        pass("Deployment", `Healthy (${latency}ms)`);
+      }
     } else {
-      // FAILED, CRASHED, etc — flag but don't abort yet (site check will determine)
-      fail("Railway", `${service.serviceName} ${deployStatus} (${agoStr})`);
+      fail("Deployment", `${SITE_URL}/api/health returned ${response.status}`);
+      abort(
+        `Health endpoint is returning HTTP ${response.status}.`,
+        "Check Railway dashboard or run: railway logs"
+      );
     }
   } catch (err: any) {
-    if (err.message?.includes("No linked project")) {
-      warn("Railway", "No project linked in site directory — skipping");
-    } else {
-      warn("Railway", `Could not check (${err.message?.slice(0, 60) ?? "unknown error"})`);
-    }
+    fail("Deployment", `Health endpoint unreachable`);
+    abort(
+      `Could not reach ${SITE_URL}/api/health: ${err.message}`,
+      "Check Railway deployment status or your network connection."
+    );
   }
 }
 
@@ -474,8 +461,8 @@ async function main() {
   // 2. Supabase
   const supabase = await checkSupabase(url, key);
 
-  // 3. Railway deployment
-  await checkRailway();
+  // 3. Deployment health
+  await checkDeployment();
 
   // 4. Site reachable
   await checkSite();
