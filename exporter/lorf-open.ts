@@ -360,14 +360,107 @@ async function checkExporter(): Promise<number> {
   return -1; // unreachable (abort exits)
 }
 
-async function checkTelemetry(supabase: SupabaseClient): Promise<{ updatedAt: string; activeAgents: number; agentCount: number }> {
-  // Task 6
-  throw new Error("Not implemented");
+async function checkTelemetry(
+  supabase: SupabaseClient
+): Promise<{ updatedAt: string; activeAgents: number; agentCount: number }> {
+  // First read
+  const { data: first, error: err1 } = await supabase
+    .from("facility_status")
+    .select("updated_at, active_agents")
+    .eq("id", 1)
+    .single();
+
+  if (err1 || !first) {
+    fail("Telemetry", "Could not read facility_status");
+    abort(`Supabase query failed: ${err1?.message ?? "no data"}`);
+  }
+
+  const firstUpdated = new Date(first.updated_at as string);
+  const firstAge = Date.now() - firstUpdated.getTime();
+
+  // If updated very recently (< 10s), trust it without waiting
+  if (firstAge < 10_000) {
+    // Also grab agent counts from project_telemetry
+    const { data: ptRows } = await supabase
+      .from("project_telemetry")
+      .select("active_agents, agent_count");
+    const totalAgents = ptRows?.reduce((sum, r) => sum + (Number(r.agent_count) || 0), 0) ?? 0;
+    const activeAgents = ptRows?.reduce((sum, r) => sum + (Number(r.active_agents) || 0), 0) ?? 0;
+
+    pass("Telemetry", `Data flowing (updated ${Math.round(firstAge / 1000)}s ago)`);
+    return { updatedAt: first.updated_at as string, activeAgents, agentCount: totalAgents };
+  }
+
+  // Wait 6s (slightly longer than the 5s aggregate cycle) and check again
+  const waitMs = 6_000;
+  await Bun.sleep(waitMs);
+
+  const { data: second, error: err2 } = await supabase
+    .from("facility_status")
+    .select("updated_at, active_agents")
+    .eq("id", 1)
+    .single();
+
+  if (err2 || !second) {
+    fail("Telemetry", "Could not re-read facility_status");
+    abort(`Supabase query failed: ${err2?.message ?? "no data"}`);
+  }
+
+  const secondUpdated = new Date(second.updated_at as string);
+
+  if (secondUpdated > firstUpdated) {
+    const { data: ptRows } = await supabase
+      .from("project_telemetry")
+      .select("active_agents, agent_count");
+    const totalAgents = ptRows?.reduce((sum, r) => sum + (Number(r.agent_count) || 0), 0) ?? 0;
+    const activeAgents = ptRows?.reduce((sum, r) => sum + (Number(r.active_agents) || 0), 0) ?? 0;
+    const age = Math.round((Date.now() - secondUpdated.getTime()) / 1000);
+
+    pass("Telemetry", `Data flowing (updated ${age}s ago)`);
+    return { updatedAt: second.updated_at as string, activeAgents, agentCount: totalAgents };
+  }
+
+  // Timestamp didn't advance — exporter is alive but not writing
+  fail("Telemetry", `Stale — last update was ${Math.round(firstAge / 1000)}s ago, no change after ${waitMs / 1000}s`);
+  const errTail = readErrLogTail(10);
+  console.log();
+  console.log(`  ${DIM}── Last 10 lines of ${ERR_LOG} ──${RESET}`);
+  for (const line of errTail.split("\n")) {
+    console.log(`  ${DIM}${line}${RESET}`);
+  }
+  abort(
+    "Exporter process is running but not writing telemetry.",
+    "It may be stuck or failing silently. Check the error log above."
+  );
+
+  // unreachable
+  return { updatedAt: "", activeAgents: 0, agentCount: 0 };
 }
 
 async function flipFacilityOpen(supabase: SupabaseClient): Promise<void> {
-  // Task 6
-  throw new Error("Not implemented");
+  const { error } = await supabase
+    .from("facility_status")
+    .update({ status: "active", updated_at: new Date().toISOString() })
+    .eq("id", 1);
+
+  if (error) {
+    fail("Facility", `Failed to set status (${error.message})`);
+    abort("Could not update facility_status to active.");
+  }
+
+  // Verify the write
+  const { data } = await supabase
+    .from("facility_status")
+    .select("status")
+    .eq("id", 1)
+    .single();
+
+  if (data?.status !== "active") {
+    fail("Facility", "Write succeeded but read-back shows wrong status");
+    abort("facility_status.status is not 'active' after update.");
+  }
+
+  pass("Facility", "Status → active");
 }
 
 // ─── Main ───────────────────────────────────────────────────────────────────
