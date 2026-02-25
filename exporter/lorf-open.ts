@@ -175,13 +175,78 @@ async function checkSupabase(url: string, key: string): Promise<SupabaseClient> 
 }
 
 async function checkRailway(): Promise<void> {
-  // Task 4
-  throw new Error("Not implemented");
+  // Check if railway CLI exists
+  try {
+    await $`command -v railway`.quiet();
+  } catch {
+    warn("Railway", "CLI not installed — skipping deployment check");
+    return;
+  }
+
+  try {
+    const result = await $`cd ${SITE_REPO_DIR} && railway status --json`
+      .quiet()
+      .timeout(10_000);
+    const status = JSON.parse(result.stdout.toString());
+
+    // Find the service instance and its latest deployment
+    const env = status.environments?.edges?.[0]?.node;
+    const service = env?.serviceInstances?.edges?.[0]?.node;
+    const deployment = service?.latestDeployment;
+
+    if (!deployment) {
+      warn("Railway", "No deployment found — skipping");
+      return;
+    }
+
+    const deployStatus = deployment.status as string;
+    const createdAt = new Date(deployment.createdAt as string);
+    const agoMs = Date.now() - createdAt.getTime();
+    const agoHours = Math.round(agoMs / 3_600_000);
+    const agoStr = agoHours < 1 ? `${Math.round(agoMs / 60_000)}m ago` : `${agoHours}h ago`;
+
+    if (deployStatus === "SUCCESS") {
+      pass("Railway", `${service.serviceName} deployed (${deployStatus}, ${agoStr})`);
+    } else if (deployStatus === "BUILDING" || deployStatus === "DEPLOYING") {
+      warn("Railway", `${service.serviceName} ${deployStatus.toLowerCase()} (started ${agoStr}) — previous deployment still serves`);
+    } else {
+      // FAILED, CRASHED, etc — flag but don't abort yet (site check will determine)
+      fail("Railway", `${service.serviceName} ${deployStatus} (${agoStr})`);
+    }
+  } catch (err: any) {
+    if (err.message?.includes("No linked project")) {
+      warn("Railway", "No project linked in site directory — skipping");
+    } else {
+      warn("Railway", `Could not check (${err.message?.slice(0, 60) ?? "unknown error"})`);
+    }
+  }
 }
 
 async function checkSite(): Promise<void> {
-  // Task 4
-  throw new Error("Not implemented");
+  try {
+    const start = Date.now();
+    const response = await fetch(SITE_URL, {
+      method: "HEAD",
+      signal: AbortSignal.timeout(10_000),
+    });
+    const latency = Date.now() - start;
+
+    if (response.ok) {
+      pass("Site", `${SITE_URL} reachable (${response.status}, ${latency}ms)`);
+    } else {
+      fail("Site", `${SITE_URL} returned ${response.status} ${response.statusText}`);
+      abort(
+        `The site is returning HTTP ${response.status}.`,
+        "Check Railway dashboard or run: railway logs"
+      );
+    }
+  } catch (err: any) {
+    fail("Site", `${SITE_URL} unreachable`);
+    abort(
+      `Could not reach site: ${err.message}`,
+      "Check DNS, Railway status, or your network connection."
+    );
+  }
 }
 
 async function checkLaunchd(): Promise<void> {
