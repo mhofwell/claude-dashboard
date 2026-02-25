@@ -6,8 +6,8 @@
   "scripts": {
     "start": "bun run index.ts",
     "backfill": "bun run index.ts --backfill",
-    "open": "bun run facility-switch.ts open",
-    "close": "bun run facility-switch.ts close"
+    "open": "bun run lorf-open.ts",
+    "close": "bun run lorf-close.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2"
