@@ -48,6 +48,15 @@ interface SnapshotEntry {
   isActive: boolean;
 }
 
+/** Count truthy values without allocating a filtered copy. */
+function countTruthy(values: boolean[]): number {
+  let n = 0;
+  for (const v of values) {
+    if (v) n++;
+  }
+  return n;
+}
+
 export class ProcessWatcher {
   private previous: Map<number, SnapshotEntry> = new Map();
   /** Sliding window of raw CPU activity per PID (true = had CPU this tick). */
@@ -58,7 +67,7 @@ export class ProcessWatcher {
   /** Number of active agents based on windowed state (cheap in-memory check). */
   get activeAgents(): number {
     let count = 0;
-    for (const [pid] of this.previous) {
+    for (const pid of this.previous.keys()) {
       if (this.isWindowActive(pid)) count++;
     }
     return count;
@@ -68,20 +77,17 @@ export class ProcessWatcher {
   private isWindowActive(pid: number): boolean {
     const window = this.activityWindow.get(pid);
     if (!window || window.length === 0) return false;
-    const activeCount = window.filter(Boolean).length;
-    return activeCount / window.length >= ACTIVE_THRESHOLD;
+    return countTruthy(window) / window.length >= ACTIVE_THRESHOLD;
   }
 
   /** Push a tick into a PID's sliding window. */
   private pushWindow(pid: number, active: boolean): void {
-    let window = this.activityWindow.get(pid);
-    if (!window) {
-      window = [];
-      this.activityWindow.set(pid, window);
-    }
-    window.push(active);
-    if (window.length > WINDOW_SIZE) {
-      window.shift();
+    const existing = this.activityWindow.get(pid);
+    if (existing) {
+      existing.push(active);
+      if (existing.length > WINDOW_SIZE) existing.shift();
+    } else {
+      this.activityWindow.set(pid, [active]);
     }
   }
 
@@ -92,7 +98,6 @@ export class ProcessWatcher {
   tick(): ProcessDiff | null {
     const state = getFacilityState();
 
-    // Build current snapshot
     const current = new Map<number, SnapshotEntry>();
     for (const proc of state.processes) {
       current.set(proc.pid, { slug: proc.slug, isActive: proc.isActive });
@@ -102,26 +107,20 @@ export class ProcessWatcher {
 
     // Update sliding windows and detect transitions
     for (const [pid, entry] of current) {
-      const prev = this.previous.get(pid);
-
-      // Push raw CPU state into window
       this.pushWindow(pid, entry.isActive);
       const windowActive = this.isWindowActive(pid);
       const wasReportedActive = this.reportedActive.get(pid) ?? false;
 
-      if (!prev) {
-        // New process
+      if (!this.previous.has(pid)) {
         events.push({ type: "instance:created", project: entry.slug, pid });
         if (windowActive) {
           events.push({ type: "instance:active", project: entry.slug, pid });
         }
         this.reportedActive.set(pid, windowActive);
       } else if (windowActive && !wasReportedActive) {
-        // Transitioned to active
         events.push({ type: "instance:active", project: entry.slug, pid });
         this.reportedActive.set(pid, true);
       } else if (!windowActive && wasReportedActive) {
-        // Transitioned to idle
         events.push({ type: "instance:idle", project: entry.slug, pid });
         this.reportedActive.set(pid, false);
       }
@@ -140,39 +139,44 @@ export class ProcessWatcher {
 
     if (events.length === 0) return null;
 
-    // Compute per-project totals using windowed active state
+    // Compute per-project totals for affected projects using windowed active state
     const affectedSlugs = new Set(
       events.map((e) => e.project).filter((s) => s !== "unknown")
     );
 
     const byProject = new Map<string, ProjectAgentState>();
     for (const slug of affectedSlugs) {
-      const procs = state.processes.filter((p) => p.slug === slug);
-      byProject.set(slug, {
-        active: procs.filter((p) => this.isWindowActive(p.pid)).length,
-        count: procs.length,
-      });
+      let count = 0;
+      let active = 0;
+      for (const proc of state.processes) {
+        if (proc.slug !== slug) continue;
+        count++;
+        if (this.isWindowActive(proc.pid)) active++;
+      }
+      byProject.set(slug, { active, count });
     }
 
     // Facility-level counts also use windowed state
-    const allWindowedActive = state.processes.filter((p) =>
+    const activeProcessPids = state.processes.filter((p) =>
       this.isWindowActive(p.pid)
     );
+    const activePidSlugs = new Set(activeProcessPids.map((p) => p.slug));
 
-    const debouncedActiveProjects = [
-      ...new Set(state.processes.map((p) => p.slug).filter((s) => s !== "unknown")),
-    ].map((slug) => ({
+    const uniqueSlugs = new Set(
+      state.processes.map((p) => p.slug).filter((s) => s !== "unknown")
+    );
+    const activeProjects = [...uniqueSlugs].map((slug) => ({
       name: slug,
-      active: allWindowedActive.some((p) => p.slug === slug),
+      active: activePidSlugs.has(slug),
     }));
 
     return {
       events,
       byProject,
       facility: {
-        status: allWindowedActive.length > 0 ? "active" : "dormant",
-        activeAgents: allWindowedActive.length,
-        activeProjects: debouncedActiveProjects,
+        status: activeProcessPids.length > 0 ? "active" : "dormant",
+        activeAgents: activeProcessPids.length,
+        activeProjects,
       },
     };
   }

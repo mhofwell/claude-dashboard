@@ -3,7 +3,7 @@
  * Reads session JSONL files from ~/.claude/projects/ and aggregates
  * token usage by project, date, and model.
  *
- * IMPORTANT: Only processes directories whose encoded CWD starts with a known
+ * Only processes directories whose encoded CWD starts with a known
  * org root prefix + "-". This prevents:
  *   1. Parent CWD misattribution (org root without trailing repo name)
  *   2. Duplicate counting from dirs outside the org root that resolve to the
@@ -13,88 +13,194 @@
 import { readdirSync, readFileSync, statSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+
 import { resolveSlug } from "./slug-resolver";
 
+// ─── Constants ──────────────────────────────────────────────────────────────
+
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
+const PROJECT_ROOT = "/Users/bigviking/Documents/github/projects/looselyorganized";
+const CANONICAL_ENCODED_ROOT = PROJECT_ROOT.replace(/\//g, "-");
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-// project -> date -> { model: totalTokens }
+/** project -> date -> { model: totalTokens } */
 export type ProjectTokenMap = Map<string, Map<string, Record<string, number>>>;
 
-// ─── Strict org-root allowlist ──────────────────────────────────────────────
-
-const PROJECT_ROOT = "/Users/bigviking/Documents/github/projects/looselyorganized";
-
-/**
- * All known org root paths whose repos should be scanned.
- * The same physical repos may appear under multiple encoded CWD prefixes
- * (e.g. after a directory rename or symlink). We pick ONE canonical prefix
- * to avoid double-counting.
- */
-const CANONICAL_ENCODED_ROOT = PROJECT_ROOT.replace(/\//g, "-");
-
-let cachedProjectDirs: string[] | null = null;
-
-function getProjectDirs(): string[] {
-  if (cachedProjectDirs) return cachedProjectDirs;
-  try {
-    cachedProjectDirs = readdirSync(PROJECT_ROOT)
-      .filter((d) => {
-        try { return statSync(join(PROJECT_ROOT, d)).isDirectory(); } catch { return false; }
-      })
-      .sort((a, b) => b.length - a.length); // Longest first for prefix matching
-  } catch {
-    cachedProjectDirs = [];
-  }
-  return cachedProjectDirs;
+interface JsonlFile {
+  fullPath: string;
+  dedupKey: string;
 }
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Read subdirectory names from PROJECT_ROOT, sorted longest-first for prefix matching. */
+function readProjectDirs(): string[] {
+  try {
+    return readdirSync(PROJECT_ROOT)
+      .filter((d) => isDirectory(join(PROJECT_ROOT, d)))
+      .sort((a, b) => b.length - a.length);
+  } catch {
+    return [];
+  }
+}
+
+/** Get or create a value in a Map, inserting `defaultValue()` if the key is absent. */
+function getOrCreate<K, V>(map: Map<K, V>, key: K, defaultValue: () => V): V {
+  let value = map.get(key);
+  if (value === undefined) {
+    value = defaultValue();
+    map.set(key, value);
+  }
+  return value;
+}
+
+// ─── Project name resolution ────────────────────────────────────────────────
 
 /**
  * Resolve an encoded ~/.claude/projects/ directory name to a project name.
  *
- * STRICT: Only matches directories under the canonical org root prefix.
- * Returns null for:
- *   - The org root itself (parent CWD — no trailing repo name)
- *   - Directories outside the org root (prevents duplicate counting)
- *   - Directories that don't match any repo on disk
+ * Only matches directories under the canonical org root prefix.
+ * Returns null for the org root itself, directories outside the org root,
+ * or directories that don't match any repo on disk.
  */
 export function resolveProjectName(encodedDirName: string): string | null {
-  const actualDirs = getProjectDirs();
   const lowerEncoded = encodedDirName.toLowerCase();
   const lowerRoot = CANONICAL_ENCODED_ROOT.toLowerCase();
 
-  // Must start with the canonical root + "-" (repo name follows the dash)
   if (!lowerEncoded.startsWith(lowerRoot + "-")) {
-    return null; // Not under the canonical org root — skip entirely
+    return null;
   }
 
-  const remainder = encodedDirName.slice(CANONICAL_ENCODED_ROOT.length + 1);
-  const lowerRemainder = remainder.toLowerCase();
+  const lowerRemainder = encodedDirName
+    .slice(CANONICAL_ENCODED_ROOT.length + 1)
+    .toLowerCase();
 
-  // Match remainder against actual repo directories on disk (longest first)
-  for (const dir of actualDirs) {
+  for (const dir of readProjectDirs()) {
     const lowerDir = dir.toLowerCase();
     if (lowerRemainder === lowerDir || lowerRemainder.startsWith(lowerDir + "-")) {
       return dir;
     }
   }
 
-  // No match on disk — skip (don't fall back to fuzzy resolution)
   return null;
 }
 
-// ─── JSONL scanner ──────────────────────────────────────────────────────────
+// ─── JSONL file discovery ───────────────────────────────────────────────────
+
+/**
+ * Find all .jsonl files in a project directory: top-level session files
+ * and subagent session files nested under <session-uuid>/subagents/.
+ */
+function discoverJsonlFiles(dirPath: string): JsonlFile[] {
+  const files: JsonlFile[] = [];
+
+  let entries: string[];
+  try {
+    entries = readdirSync(dirPath);
+  } catch {
+    return files;
+  }
+
+  for (const entry of entries) {
+    if (entry.endsWith(".jsonl")) {
+      files.push({ fullPath: join(dirPath, entry), dedupKey: entry });
+      continue;
+    }
+
+    try {
+      const subDir = join(dirPath, entry, "subagents");
+      for (const sf of readdirSync(subDir)) {
+        if (sf.endsWith(".jsonl")) {
+          files.push({
+            fullPath: join(subDir, sf),
+            dedupKey: join(entry, "subagents", sf),
+          });
+        }
+      }
+    } catch {
+      // Not a session directory or no subagents
+    }
+  }
+
+  return files;
+}
+
+// ─── Usage record extraction ────────────────────────────────────────────────
+
+/**
+ * Extract usage records from a single JSONL file and accumulate them
+ * into the result map. Returns the number of records extracted.
+ *
+ * Fast-filters lines by "usage" substring before parsing JSON.
+ * Deduplicates by requestId to avoid counting streaming chunks.
+ */
+function extractUsageRecords(
+  filePath: string,
+  projectSlug: string,
+  result: ProjectTokenMap
+): number {
+  const content = readFileSync(filePath, "utf-8");
+  const seenRequestIds = new Set<string>();
+  let recordCount = 0;
+
+  for (const line of content.split("\n")) {
+    if (!line.includes('"usage"')) continue;
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const usage = parsed?.message?.usage;
+    if (!usage) continue;
+
+    const requestId = parsed.requestId;
+    if (requestId) {
+      if (seenRequestIds.has(requestId)) continue;
+      seenRequestIds.add(requestId);
+    }
+
+    const model = parsed.message?.model;
+    const timestamp = parsed.timestamp;
+    if (!model || !timestamp) continue;
+
+    const tokens =
+      (usage.input_tokens ?? 0) +
+      (usage.cache_creation_input_tokens ?? 0) +
+      (usage.cache_read_input_tokens ?? 0) +
+      (usage.output_tokens ?? 0);
+
+    if (tokens === 0) continue;
+
+    const date = timestamp.substring(0, 10);
+    const dateMap = getOrCreate(result, projectSlug, () => new Map());
+    const modelMap = getOrCreate(dateMap, date, () => ({}));
+    modelMap[model] = (modelMap[model] ?? 0) + tokens;
+
+    recordCount++;
+  }
+
+  return recordCount;
+}
+
+// ─── Main scanner ───────────────────────────────────────────────────────────
 
 /**
  * Scan all JSONL session files and aggregate token usage
  * by project, date, and model.
- *
- * Uses fast-filtering: only JSON.parse lines containing "usage" substring.
- * Deduplicates by requestId to avoid counting streaming chunks multiple times.
  */
 export function scanProjectTokens(): ProjectTokenMap {
-  cachedProjectDirs = null; // Force fresh directory listing each scan
   const result: ProjectTokenMap = new Map();
 
   let projectDirs: string[];
@@ -111,22 +217,12 @@ export function scanProjectTokens(): ProjectTokenMap {
   let skippedDirs = 0;
   let dedupedFiles = 0;
 
-  // Track seen JSONL filenames per slug to prevent double-counting
-  // when the same session file appears under multiple directory paths
   const seenFilesBySlug = new Map<string, Set<string>>();
 
   for (const dirName of projectDirs) {
     const dirPath = join(PROJECTS_DIR, dirName);
+    if (!isDirectory(dirPath)) continue;
 
-    let stat;
-    try {
-      stat = statSync(dirPath);
-    } catch {
-      continue;
-    }
-    if (!stat.isDirectory()) continue;
-
-    // Strict: only process dirs under the canonical org root
     const projectName = resolveProjectName(dirName);
     if (!projectName) {
       skippedDirs++;
@@ -134,131 +230,39 @@ export function scanProjectTokens(): ProjectTokenMap {
     }
 
     const projectSlug = resolveSlug(join(PROJECT_ROOT, projectName));
-
-    // Skip non-LO projects
     if (!projectSlug) continue;
 
-    // Initialize dedup set for this slug
-    if (!seenFilesBySlug.has(projectSlug)) {
-      seenFilesBySlug.set(projectSlug, new Set());
-    }
-    const seenFiles = seenFilesBySlug.get(projectSlug)!;
+    const seenFiles = getOrCreate(seenFilesBySlug, projectSlug, () => new Set());
+    const filePaths = discoverJsonlFiles(dirPath);
 
-    // Find all .jsonl files: top-level sessions + subagent sessions
-    let filePaths: { fullPath: string; dedupKey: string }[];
-    try {
-      filePaths = [];
-      const entries = readdirSync(dirPath);
-      for (const entry of entries) {
-        if (entry.endsWith(".jsonl")) {
-          filePaths.push({ fullPath: join(dirPath, entry), dedupKey: entry });
-        } else {
-          // Check for subagent files in <session-uuid>/subagents/
-          try {
-            const subDir = join(dirPath, entry, "subagents");
-            for (const sf of readdirSync(subDir)) {
-              if (sf.endsWith(".jsonl")) {
-                filePaths.push({
-                  fullPath: join(subDir, sf),
-                  dedupKey: join(entry, "subagents", sf),
-                });
-              }
-            }
-          } catch {
-            // Not a session directory or no subagents — skip
-          }
-        }
-      }
-    } catch {
-      continue;
-    }
-
-    for (const { fullPath: filePath, dedupKey } of filePaths) {
-      // File-level dedup: skip if we've already counted this session file for this slug
+    for (const { fullPath, dedupKey } of filePaths) {
       if (seenFiles.has(dedupKey)) {
         dedupedFiles++;
         continue;
       }
       seenFiles.add(dedupKey);
-
       totalFiles++;
 
       try {
-        const content = readFileSync(filePath, "utf-8");
-        const seenRequestIds = new Set<string>();
-
-        for (const line of content.split("\n")) {
-          // Fast-filter: skip lines that don't contain usage data
-          if (!line.includes('"usage"')) continue;
-
-          let parsed: any;
-          try {
-            parsed = JSON.parse(line);
-          } catch {
-            continue;
-          }
-
-          const usage = parsed?.message?.usage;
-          if (!usage) continue;
-
-          // Deduplicate by requestId (streaming produces multiple lines)
-          const requestId = parsed.requestId;
-          if (requestId) {
-            if (seenRequestIds.has(requestId)) continue;
-            seenRequestIds.add(requestId);
-          }
-
-          const model = parsed.message?.model;
-          const timestamp = parsed.timestamp;
-          if (!model || !timestamp) continue;
-
-          // Extract date from ISO timestamp
-          const date = timestamp.substring(0, 10); // "YYYY-MM-DD"
-
-          const tokens =
-            (usage.input_tokens ?? 0) +
-            (usage.cache_creation_input_tokens ?? 0) +
-            (usage.cache_read_input_tokens ?? 0) +
-            (usage.output_tokens ?? 0);
-
-          if (tokens === 0) continue;
-
-          // Accumulate into result map (keyed by slug, not dir name)
-          if (!result.has(projectSlug)) {
-            result.set(projectSlug, new Map());
-          }
-          const dateMap = result.get(projectSlug)!;
-          if (!dateMap.has(date)) {
-            dateMap.set(date, {});
-          }
-          const modelMap = dateMap.get(date)!;
-          modelMap[model] = (modelMap[model] ?? 0) + tokens;
-
-          totalRecords++;
-        }
+        totalRecords += extractUsageRecords(fullPath, projectSlug, result);
       } catch {
         skippedFiles++;
-        continue;
       }
     }
   }
 
-  console.log(
-    `  Scanned ${totalFiles} JSONL files, ${totalRecords} usage records` +
-      (skippedDirs > 0 ? `, ${skippedDirs} dirs skipped (non-org-root)` : "") +
-      (dedupedFiles > 0 ? `, ${dedupedFiles} deduped` : "") +
-      (skippedFiles > 0 ? `, ${skippedFiles} errors` : "")
-  );
+  const parts = [`  Scanned ${totalFiles} JSONL files, ${totalRecords} usage records`];
+  if (skippedDirs > 0) parts.push(`${skippedDirs} dirs skipped (non-org-root)`);
+  if (dedupedFiles > 0) parts.push(`${dedupedFiles} deduped`);
+  if (skippedFiles > 0) parts.push(`${skippedFiles} errors`);
+  console.log(parts.join(", "));
 
   return result;
 }
 
 // ─── Per-project lifetime totals ────────────────────────────────────────────
 
-/**
- * Compute total lifetime tokens per project from the token map.
- * Returns { projectName: totalTokens }
- */
+/** Compute total lifetime tokens per project from the token map. */
 export function computeTokensByProject(
   tokenMap: ProjectTokenMap
 ): Record<string, number> {

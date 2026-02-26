@@ -84,12 +84,18 @@ if (existsSync(PID_FILE)) {
 writeFileSync(PID_FILE, String(process.pid));
 
 // Clean up PID file on exit
-function removePidFile() {
+function removePidFile(): void {
   try { unlinkSync(PID_FILE); } catch {}
 }
+
+function handleShutdown(): void {
+  removePidFile();
+  process.exit(0);
+}
+
 process.on("exit", removePidFile);
-process.on("SIGINT", () => { removePidFile(); process.exit(0); });
-process.on("SIGTERM", () => { removePidFile(); process.exit(0); });
+process.on("SIGINT", handleShutdown);
+process.on("SIGTERM", handleShutdown);
 
 // ─── Init ──────────────────────────────────────────────────────────────────
 
@@ -104,6 +110,23 @@ initSupabase(SUPABASE_URL, SUPABASE_KEY);
 loadVisibilityCache();
 
 const tailer = new LogTailer();
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+interface LifetimeCounters {
+  sessions: number;
+  messages: number;
+  toolCalls: number;
+  agentSpawns: number;
+  teamMessages: number;
+}
+
+interface TodayTokens {
+  total: number;
+  models: Record<string, number>;
+}
+
+// ─── State ──────────────────────────────────────────────────────────────────
 
 // Track projects we've already ensured exist in the DB (by slug)
 const knownProjects = new Set<string>();
@@ -121,11 +144,11 @@ function loadSavedSlugMapping(): Record<string, string> {
   }
 }
 
-function saveSlugMapping(mapping: Record<string, string>) {
+function saveSlugMapping(mapping: Record<string, string>): void {
   writeFileSync(SLUG_MAPPING_FILE, JSON.stringify(mapping, null, 2));
 }
 
-async function refreshSlugMap() {
+async function refreshSlugMap(): Promise<void> {
   clearSlugCache();
   slugMap = buildSlugMap();
   console.log(`  Slug map: ${slugMap.size} projects mapped`);
@@ -160,26 +183,20 @@ function toSlug(dirName: string): string | null {
 
 /** Filter entries to only LO projects and map project fields to slugs */
 function filterAndMapEntries(entries: LogEntry[]): LogEntry[] {
-  return entries
-    .filter((e) => e.project && toSlug(e.project) !== null)
-    .map((e) => ({
-      ...e,
-      project: toSlug(e.project)!,
-    }));
+  return entries.flatMap((e) => {
+    const slug = e.project ? toSlug(e.project) : null;
+    return slug ? [{ ...e, project: slug }] : [];
+  });
 }
 
 // Cache project token totals for facility status updates
 let cachedTokensByProject: Record<string, number> = {};
 
 // Cache per-project lifetime counters for project_telemetry writes
-let cachedLifetimeCounters: Record<string, {
-  sessions: number; messages: number; toolCalls: number; agentSpawns: number; teamMessages: number;
-}> = {};
+let cachedLifetimeCounters: Record<string, LifetimeCounters> = {};
 
 // Cache per-project today tokens for project_telemetry writes
-let cachedTodayTokensByProject: Record<string, {
-  total: number; models: Record<string, number>;
-}> = {};
+let cachedTodayTokensByProject: Record<string, TodayTokens> = {};
 
 // Cache all seen log entries to avoid re-reading the entire events.log
 let allSeenEntries: LogEntry[] = [];
@@ -187,9 +204,28 @@ let allSeenEntries: LogEntry[] = [];
 // Cache model stats — only re-read from disk when new events arrive
 let cachedModelStats: ReturnType<typeof readModelStats> = [];
 
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+/** Format a token count as "1.2M", "456.7K", etc. */
+function formatTokens(n: number): string {
+  return (n / 1e6).toFixed(1) + "M";
+}
+
+/** Today's date as "YYYY-MM-DD". */
+function todayDateString(): string {
+  return new Date().toISOString().split("T")[0];
+}
+
+/** Sum a numeric field across all values in a record. */
+function sumValues(record: Record<string, number>): number {
+  let total = 0;
+  for (const v of Object.values(record)) total += v;
+  return total;
+}
+
 // ─── Ensure projects exist ─────────────────────────────────────────────────
 
-async function ensureProjects(entries: LogEntry[]) {
+async function ensureProjects(entries: LogEntry[]): Promise<void> {
   const newSlugs = new Set<string>();
   const slugToLocalName = new Map<string, string>();
 
@@ -222,21 +258,13 @@ async function ensureProjects(entries: LogEntry[]) {
 
 function computeTodayTokens(): number {
   let total = 0;
-  for (const entry of Object.values(cachedTodayTokensByProject)) {
-    total += entry.total;
-  }
+  for (const entry of Object.values(cachedTodayTokensByProject)) total += entry.total;
   return total;
 }
 
-function computeLifetimeSessions(): number {
+function sumLifetimeField(field: keyof LifetimeCounters): number {
   let total = 0;
-  for (const c of Object.values(cachedLifetimeCounters)) total += c.sessions;
-  return total;
-}
-
-function computeLifetimeMessages(): number {
-  let total = 0;
-  for (const c of Object.values(cachedLifetimeCounters)) total += c.messages;
+  for (const c of Object.values(cachedLifetimeCounters)) total += c[field];
   return total;
 }
 
@@ -264,11 +292,13 @@ function aggregateProjectEvents(entries: LogEntry[]): ProjectEventAggregates {
       dateMap.set(date, counts);
     }
 
-    if (entry.eventType === "session_start") counts.sessions++;
-    else if (entry.eventType === "response_finish") counts.messages++;
-    else if (entry.eventType === "tool") counts.toolCalls++;
-    else if (entry.eventType === "agent_spawn") counts.agentSpawns++;
-    else if (entry.eventType === "message") counts.teamMessages++;
+    switch (entry.eventType) {
+      case "session_start":   counts.sessions++; break;
+      case "response_finish": counts.messages++; break;
+      case "tool":            counts.toolCalls++; break;
+      case "agent_spawn":     counts.agentSpawns++; break;
+      case "message":         counts.teamMessages++; break;
+    }
   }
 
   return agg;
@@ -319,10 +349,12 @@ function buildProjectTelemetryUpdates(
     ...Object.keys(cachedTodayTokensByProject),
   ]);
 
+  const emptyCounters: LifetimeCounters = {
+    sessions: 0, messages: 0, toolCalls: 0, agentSpawns: 0, teamMessages: 0,
+  };
+
   return [...allSlugs].map((slug) => {
-    const counters = cachedLifetimeCounters[slug] ?? {
-      sessions: 0, messages: 0, toolCalls: 0, agentSpawns: 0, teamMessages: 0,
-    };
+    const counters = cachedLifetimeCounters[slug] ?? emptyCounters;
     const todayData = cachedTodayTokensByProject[slug] ?? { total: 0, models: {} };
     const agents = agentsByProject?.[slug] ?? { count: 0, active: 0 };
     return {
@@ -341,37 +373,50 @@ function buildProjectTelemetryUpdates(
   });
 }
 
-// ─── Backfill ──────────────────────────────────────────────────────────────
+// ─── Shared: insert events and update project activity ──────────────────────
 
-async function backfill() {
-  console.log("Starting backfill...");
-
-  // 0. Build slug map
-  await refreshSlugMap();
-
-  // 1. Read all events
-  console.log("  Reading events.log...");
-  const allEntries = tailer.readAll();
-  allSeenEntries = allEntries;
-  console.log(`  Found ${allEntries.length} events`);
-
-  // 2. Ensure all projects exist
-  console.log("  Registering projects...");
-  await ensureProjects(allEntries);
-
-  // 3. Insert events in batches (with project mapped to slug)
-  console.log("  Inserting events...");
-  const loEntries = filterAndMapEntries(allEntries);
+/**
+ * Filter entries to LO projects, insert into Supabase, and update
+ * per-project activity counts. Returns the insert result.
+ */
+async function insertAndTrackActivity(entries: LogEntry[]): Promise<{
+  inserted: number;
+  errors: number;
+}> {
+  const loEntries = filterAndMapEntries(entries);
   const { inserted, errors, insertedByProject } = await insertEvents(loEntries);
-  console.log(`  Inserted: ${inserted}, Errors: ${errors}`);
 
-  // 4. Update project activity counts (insertedByProject keys are already slugs from loEntries)
-  console.log("  Updating project activity...");
   const slugLastActive = computeSlugLastActive(loEntries);
   for (const [slug, count] of Object.entries(insertedByProject)) {
     const lastActive = slugLastActive[slug] ?? new Date();
     await updateProjectActivity(slug, count, lastActive);
   }
+
+  return { inserted, errors };
+}
+
+// ─── Backfill ──────────────────────────────────────────────────────────────
+
+async function backfill(): Promise<void> {
+  console.log("Starting backfill...");
+
+  // 1. Build slug map
+  await refreshSlugMap();
+
+  // 2. Read all events
+  console.log("  Reading events.log...");
+  const allEntries = tailer.readAll();
+  allSeenEntries = allEntries;
+  console.log(`  Found ${allEntries.length} events`);
+
+  // 3. Ensure all projects exist
+  console.log("  Registering projects...");
+  await ensureProjects(allEntries);
+
+  // 4. Insert events and update project activity
+  console.log("  Inserting events...");
+  const { inserted, errors } = await insertAndTrackActivity(allEntries);
+  console.log(`  Inserted: ${inserted}, Errors: ${errors}`);
 
   // 5. Sync daily metrics from stats-cache.json
   console.log("  Syncing daily metrics...");
@@ -397,34 +442,32 @@ async function backfill() {
 
   // 8. Populate caches for project_telemetry writes from daily_metrics (authoritative)
   await refreshLifetimeCountersFromDb();
-  refreshTodayTokensCache(projectTokenMap, new Date().toISOString().split("T")[0]);
+  refreshTodayTokensCache(projectTokenMap, todayDateString());
 
   // 9. Update facility status + project_telemetry
   console.log("  Updating facility status...");
   await syncFacilityStatus(statsCache, cachedModelStats);
 
-  // 10. Verify backfill writes persisted — refresh caches from DB
+  // 10. Verify backfill writes persisted -- refresh caches from DB
   console.log("  Verifying backfill writes...");
   const { data: verifyRows } = await getSupabase()
     .from("project_telemetry")
     .select("project, tokens_lifetime");
   if (verifyRows) {
-    const fmt = (n: number) => (n / 1e6).toFixed(1) + "M";
     for (const row of verifyRows) {
       const slug = row.project as string;
       const dbTokens = Number(row.tokens_lifetime);
       const expected = cachedTokensByProject[slug] ?? 0;
       if (dbTokens !== expected) {
         console.warn(
-          `  WARN: ${slug} — cache has ${fmt(expected)} but DB has ${fmt(dbTokens)}`
+          `  WARN: ${slug} — cache has ${formatTokens(expected)} but DB has ${formatTokens(dbTokens)}`
         );
       }
-      // Refresh cache from DB (belt-and-suspenders)
       cachedTokensByProject[slug] = dbTokens;
     }
     console.log(
       `  Verified ${verifyRows.length} project_telemetry rows:`,
-      verifyRows.map((r) => `${r.project}: ${fmt(Number(r.tokens_lifetime))}`).join(", ")
+      verifyRows.map((r) => `${r.project}: ${formatTokens(Number(r.tokens_lifetime))}`).join(", ")
     );
   }
 
@@ -435,28 +478,18 @@ async function backfill() {
 
 // ─── Incremental sync ──────────────────────────────────────────────────────
 
-async function incrementalSync() {
+async function incrementalSync(): Promise<void> {
   const newEntries = tailer.poll();
   if (newEntries.length > 0) allSeenEntries.push(...newEntries);
 
   if (newEntries.length > 0) {
-    // Ensure projects exist
     await ensureProjects(newEntries);
 
-    // Insert new events (only LO projects, mapped to slug)
-    const loEntries = filterAndMapEntries(newEntries);
-    const { inserted, errors, insertedByProject } = await insertEvents(loEntries);
+    const { inserted, errors } = await insertAndTrackActivity(newEntries);
     if (inserted > 0 || errors > 0) {
       console.log(
         `  ${new Date().toLocaleTimeString()} — ${inserted} events synced${errors > 0 ? `, ${errors} errors` : ""}`
       );
-    }
-
-    // Update project activity (insertedByProject keys are already slugs from loEntries)
-    const slugLastActive = computeSlugLastActive(loEntries);
-    for (const [slug, count] of Object.entries(insertedByProject)) {
-      const lastActive = slugLastActive[slug] ?? new Date();
-      await updateProjectActivity(slug, count, lastActive);
     }
   }
 
@@ -468,10 +501,26 @@ async function incrementalSync() {
 
 // ─── Facility status sync ──────────────────────────────────────────────────
 
+/** Build the aggregate metrics shared by facility status and metrics-only updates. */
+function buildFacilityMetrics(
+  statsCache: ReturnType<typeof readStatsCache>,
+  modelStats: ReturnType<typeof readModelStats>
+): FacilityMetricsUpdate {
+  return {
+    tokensLifetime: sumValues(cachedTokensByProject),
+    tokensToday: computeTodayTokens(),
+    sessionsLifetime: sumLifetimeField("sessions"),
+    messagesLifetime: sumLifetimeField("messages"),
+    modelStats: formatModelStats(modelStats),
+    hourDistribution: statsCache?.hourCounts ?? {},
+    firstSessionDate: statsCache?.firstSessionDate ?? null,
+  };
+}
+
 async function syncFacilityStatus(
   statsCache: ReturnType<typeof readStatsCache>,
   modelStats: ReturnType<typeof readModelStats>
-) {
+): Promise<ReturnType<typeof getFacilityState>> {
   const facility = getFacilityState();
 
   // Compute per-project agent breakdown (keyed by slug)
@@ -486,21 +535,13 @@ async function syncFacilityStatus(
   }
 
   const update: FacilityUpdate = {
+    ...buildFacilityMetrics(statsCache, modelStats),
     status: facility.status,
     activeAgents: facility.activeAgents,
     activeProjects: facility.activeProjects,
-    tokensLifetime: Object.values(cachedTokensByProject).reduce((a, b) => a + b, 0),
-    tokensToday: computeTodayTokens(),
-    sessionsLifetime: computeLifetimeSessions(),
-    messagesLifetime: computeLifetimeMessages(),
-    modelStats: formatModelStats(modelStats),
-    hourDistribution: statsCache?.hourCounts ?? {},
-    firstSessionDate: statsCache?.firstSessionDate ?? null,
   };
 
   await updateFacilityStatus(update);
-
-  // Build and write per-project telemetry rows (with live agent counts)
   await batchUpsertProjectTelemetry(buildProjectTelemetryUpdates(agentsByProject));
 
   return facility;
@@ -511,20 +552,8 @@ async function syncFacilityStatus(
 async function syncAggregateMetrics(
   statsCache: ReturnType<typeof readStatsCache>,
   modelStats: ReturnType<typeof readModelStats>
-) {
-  const metricsUpdate: FacilityMetricsUpdate = {
-    tokensLifetime: Object.values(cachedTokensByProject).reduce((a, b) => a + b, 0),
-    tokensToday: computeTodayTokens(),
-    sessionsLifetime: computeLifetimeSessions(),
-    messagesLifetime: computeLifetimeMessages(),
-    modelStats: formatModelStats(modelStats),
-    hourDistribution: statsCache?.hourCounts ?? {},
-    firstSessionDate: statsCache?.firstSessionDate ?? null,
-  };
-
-  await updateFacilityMetrics(metricsUpdate);
-
-  // Build per-project telemetry (aggregate fields only — no agentsByProject, skip agent fields)
+): Promise<void> {
+  await updateFacilityMetrics(buildFacilityMetrics(statsCache, modelStats));
   await batchUpsertProjectTelemetry(buildProjectTelemetryUpdates(), { skipAgentFields: true });
 }
 
@@ -534,9 +563,9 @@ let lastDailySync = "";
 
 async function maybeSyncDailyMetrics(
   statsCache: ReturnType<typeof readStatsCache>
-) {
-  const today = new Date().toISOString().split("T")[0];
-  if (today === lastDailySync) return; // Already synced today's data this cycle
+): Promise<void> {
+  const today = todayDateString();
+  if (today === lastDailySync) return;
 
   if (statsCache) {
     await syncDailyMetrics(statsCache);
@@ -549,8 +578,8 @@ async function maybeSyncDailyMetrics(
 let lastProjectSync = "";
 let lastPruneDate = "";
 
-async function maybeSyncProjectDailyMetrics() {
-  const today = new Date().toISOString().split("T")[0];
+async function maybeSyncProjectDailyMetrics(): Promise<void> {
+  const today = todayDateString();
   if (today === lastProjectSync) return;
 
   try {
@@ -573,13 +602,13 @@ async function maybeSyncProjectDailyMetrics() {
  * from daily_metrics in Supabase. This is the authoritative source
  * because in daemon mode allSeenEntries only contains events since startup.
  */
-async function refreshLifetimeCountersFromDb() {
+async function refreshLifetimeCountersFromDb(): Promise<void> {
   const { data: lifetimeRows } = await getSupabase()
     .from("daily_metrics")
     .select("project, sessions, messages, tool_calls, agent_spawns, team_messages")
     .not("project", "is", null);
   if (lifetimeRows) {
-    const sums: Record<string, { sessions: number; messages: number; toolCalls: number; agentSpawns: number; teamMessages: number }> = {};
+    const sums: Record<string, LifetimeCounters> = {};
     for (const row of lifetimeRows) {
       const p = row.project as string;
       if (!sums[p]) sums[p] = { sessions: 0, messages: 0, toolCalls: 0, agentSpawns: 0, teamMessages: 0 };
@@ -598,28 +627,23 @@ async function refreshLifetimeCountersFromDb() {
  * Runs on the 5-minute cycle so token counts and lifetime counters
  * stay current throughout the day.
  */
-async function refreshProjectCachesFromDisk() {
-  const today = new Date().toISOString().split("T")[0];
+async function refreshProjectCachesFromDisk(): Promise<void> {
+  const today = todayDateString();
   const projectTokenMap = scanProjectTokens();
   cachedTokensByProject = computeTokensByProject(projectTokenMap);
   refreshTodayTokensCache(projectTokenMap, today);
   await refreshLifetimeCountersFromDb();
 }
 
-function refreshTodayTokensCache(projectTokenMap: ReturnType<typeof scanProjectTokens>, today: string) {
+function refreshTodayTokensCache(projectTokenMap: ReturnType<typeof scanProjectTokens>, today: string): void {
   for (const [slug, dateMap] of projectTokenMap) {
-    const todayTokens = dateMap.get(today);
-    if (todayTokens) {
-      const total = Object.values(todayTokens).reduce((a, b) => a + b, 0);
-      cachedTodayTokensByProject[slug] = { total, models: todayTokens };
-    } else {
-      cachedTodayTokensByProject[slug] = { total: 0, models: {} };
-    }
+    const models = dateMap.get(today) ?? {};
+    cachedTodayTokensByProject[slug] = { total: sumValues(models), models };
   }
 }
 
-async function maybePruneEvents() {
-  const today = new Date().toISOString().split("T")[0];
+async function maybePruneEvents(): Promise<void> {
+  const today = todayDateString();
   if (today === lastPruneDate) return;
 
   try {
@@ -635,7 +659,7 @@ async function maybePruneEvents() {
 
 // ─── Prune in-memory seen entries ───────────────────────────────────────────
 
-function pruneSeenEntries() {
+function pruneSeenEntries(): void {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 31);
   const before = allSeenEntries.length;
@@ -652,7 +676,7 @@ function pruneSeenEntries() {
 
 const GAP_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes — longer than any normal push cycle
 
-async function gapBackfill(allEntries: LogEntry[]) {
+async function gapBackfill(allEntries: LogEntry[]): Promise<void> {
   // Check when the exporter last pushed
   const { data: facilityRow } = await getSupabase()
     .from("facility_status")
@@ -684,28 +708,15 @@ async function gapBackfill(allEntries: LogEntry[]) {
   );
 
   if (gapEntries.length === 0) {
-    // No events in the gap, but still need to sync daily metrics and tokens
     console.log("  No events to backfill, syncing metrics only...");
   } else {
-    // Ensure projects exist
     await ensureProjects(gapEntries);
 
-    // Insert gap events
-    const loEntries = filterAndMapEntries(gapEntries);
-    const { inserted, errors, insertedByProject } =
-      await insertEvents(loEntries);
+    const { inserted, errors } = await insertAndTrackActivity(gapEntries);
     console.log(
       `  Gap backfill: ${inserted} events inserted${errors > 0 ? `, ${errors} errors` : ""}`
     );
 
-    // Update project activity
-    const slugLastActive = computeSlugLastActive(loEntries);
-    for (const [slug, count] of Object.entries(insertedByProject)) {
-      const lastActive = slugLastActive[slug] ?? new Date();
-      await updateProjectActivity(slug, count, lastActive);
-    }
-
-    // Keep gap entries in allSeenEntries for aggregation
     allSeenEntries.push(...gapEntries);
   }
 
@@ -731,7 +742,7 @@ async function gapBackfill(allEntries: LogEntry[]) {
 
   // Populate caches from daily_metrics (authoritative)
   await refreshLifetimeCountersFromDb();
-  refreshTodayTokensCache(projectTokenMap, new Date().toISOString().split("T")[0]);
+  refreshTodayTokensCache(projectTokenMap, todayDateString());
 
   // Update facility status with fresh data
   await syncFacilityStatus(statsCache, cachedModelStats);
@@ -742,7 +753,7 @@ async function gapBackfill(allEntries: LogEntry[]) {
 
 // ─── Main loop ─────────────────────────────────────────────────────────────
 
-async function main() {
+async function main(): Promise<void> {
   if (IS_BACKFILL) {
     await backfill();
   } else {
@@ -796,7 +807,7 @@ async function main() {
   let autoCloseFired = false;
 
   // ── Loop 1: Process Watcher (250ms) ──
-  const watcherLoop = async () => {
+  async function watcherLoop(): Promise<never> {
     while (true) {
       try {
         const diff = watcher.tick();
@@ -808,13 +819,11 @@ async function main() {
           }
         }
 
-        // Track active agents for auto-close (uses in-memory snapshot, no extra process scan)
         if (watcher.activeAgents > 0) {
           lastActiveAgentTime = Date.now();
           autoCloseFired = false;
         }
 
-        // Auto-close after 2h of no active agents
         if (!autoCloseFired && Date.now() - lastActiveAgentTime > AUTO_CLOSE_MS) {
           await setFacilitySwitch("dormant");
           autoCloseFired = true;
@@ -825,11 +834,11 @@ async function main() {
       }
       await Bun.sleep(250);
     }
-  };
+  }
 
   // ── Loop 2: Aggregate Metrics (5s) ──
   let cycleCount = 0;
-  const aggregateLoop = async () => {
+  async function aggregateLoop(): Promise<never> {
     while (true) {
       try {
         await incrementalSync();
@@ -852,7 +861,7 @@ async function main() {
       }
       await Bun.sleep(5000);
     }
-  };
+  }
 
   // Run both loops concurrently
   await Promise.all([watcherLoop(), aggregateLoop()]);

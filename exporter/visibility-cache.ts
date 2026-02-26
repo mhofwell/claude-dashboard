@@ -4,19 +4,20 @@
  */
 
 import { execSync } from "child_process";
-import { readFileSync, writeFileSync, existsSync } from "fs";
-import { join, dirname } from "path";
+import { existsSync, readFileSync, writeFileSync } from "fs";
+import { dirname, join } from "path";
+
+type Visibility = "public" | "classified";
 
 const CACHE_FILE = join(
   dirname(new URL(import.meta.url).pathname),
   ".visibility-cache.json"
 );
 
-let cache: Record<string, "public" | "classified"> = {};
-let ghRepoMap: Record<string, boolean> | null = null; // name → isPrivate
+let cache: Record<string, Visibility> = {};
+let ghRepoMap: Record<string, boolean> | null = null;
 
-/** Load cache from disk. */
-export function loadVisibilityCache() {
+export function loadVisibilityCache(): void {
   try {
     if (existsSync(CACHE_FILE)) {
       cache = JSON.parse(readFileSync(CACHE_FILE, "utf-8"));
@@ -26,18 +27,19 @@ export function loadVisibilityCache() {
   }
 }
 
-/** Save cache to disk. */
-function saveCache() {
+function saveCache(): void {
   try {
     writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
-  } catch {}
+  } catch {
+    // Best-effort persistence -- non-critical if disk write fails
+  }
 }
 
 /**
  * Fetch all repos from GitHub in one call.
- * Maps repo name → isPrivate. Only needs to run once per session.
+ * Maps repo name to isPrivate. Only runs once per session.
  */
-function ensureGhRepoMap() {
+function ensureGhRepoMap(): void {
   if (ghRepoMap !== null) return;
 
   ghRepoMap = {};
@@ -47,38 +49,36 @@ function ensureGhRepoMap() {
       { encoding: "utf-8", timeout: 15000, stdio: ["pipe", "pipe", "pipe"] }
     ).trim();
 
-    for (const line of output.split("\n")) {
-      const [name, isPrivate] = line.trim().split(" ");
-      if (name) {
-        ghRepoMap[name] = isPrivate === "true";
+    if (output) {
+      for (const line of output.split("\n")) {
+        const [name, isPrivate] = line.trim().split(" ");
+        if (name) {
+          ghRepoMap[name] = isPrivate === "true";
+        }
       }
     }
     console.log(`  Loaded ${Object.keys(ghRepoMap).length} repos from GitHub`);
-  } catch (err) {
-    console.warn("  Warning: Could not fetch GitHub repos. Defaulting to classified.");
+  } catch {
+    console.warn(
+      "  Warning: Could not fetch GitHub repos. Defaulting to classified."
+    );
   }
 }
 
 /**
- * Check if a project is public or classified (private).
+ * Resolve a project name to its visibility.
  * Uses the cached GitHub repo list for fast lookups.
+ * Defaults to "classified" (safer) when a project is not found on GitHub.
  */
-export function getVisibility(projectName: string): "public" | "classified" {
+export function getVisibility(projectName: string): Visibility {
   if (cache[projectName]) return cache[projectName];
 
   ensureGhRepoMap();
 
-  let visibility: "public" | "classified";
-
-  if (ghRepoMap && projectName in ghRepoMap) {
-    visibility = ghRepoMap[projectName] ? "classified" : "public";
-  } else {
-    // Not found on GitHub — default to classified (safer)
-    visibility = "classified";
-  }
+  const isPublic = ghRepoMap![projectName] === false;
+  const visibility: Visibility = isPublic ? "public" : "classified";
 
   cache[projectName] = visibility;
   saveCache();
   return visibility;
 }
-

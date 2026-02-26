@@ -9,15 +9,12 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import { basename, join } from "path";
 
-const PROJECT_ROOT = "/Users/bigviking/Documents/github/projects/looselyorganized";
+const PROJECT_ROOT =
+  "/Users/bigviking/Documents/github/projects/looselyorganized";
 
-const cache = new Map<string, string | null>();
+const slugCache = new Map<string, string | null>();
 
-/**
- * Minimal YAML frontmatter parser.
- * Extracts key: value pairs between --- fences.
- * No external dependencies.
- */
+/** Minimal YAML frontmatter parser — extracts key: value pairs between --- fences. */
 function parseFrontmatter(content: string): Record<string, string> {
   const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
   if (!match) return {};
@@ -32,6 +29,14 @@ function parseFrontmatter(content: string): Record<string, string> {
   return result;
 }
 
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Resolve a project directory path to its content_slug.
  * Returns null if the project has no .lo/ directory (opt-in signal).
@@ -39,26 +44,25 @@ function parseFrontmatter(content: string): Record<string, string> {
  * refresh and retroactively backfills all historical telemetry from JSONL.
  */
 export function resolveSlug(projectDir: string): string | null {
-  if (cache.has(projectDir)) return cache.get(projectDir)!;
+  if (slugCache.has(projectDir)) return slugCache.get(projectDir)!;
 
   const loDir = join(projectDir, ".lo");
   if (!existsSync(loDir)) {
-    cache.set(projectDir, null);
+    slugCache.set(projectDir, null);
     return null;
   }
 
   let slug = basename(projectDir);
 
   try {
-    const loPath = join(loDir, "project.md");
-    const content = readFileSync(loPath, "utf-8");
+    const content = readFileSync(join(loDir, "project.md"), "utf-8");
     const fm = parseFrontmatter(content);
     slug = fm.content_slug ?? fm.slug ?? slug;
   } catch {
     // .lo/ exists but no project.md — use directory basename
   }
 
-  cache.set(projectDir, slug);
+  slugCache.set(projectDir, slug);
   return slug;
 }
 
@@ -71,19 +75,13 @@ export function buildSlugMap(): Map<string, string> {
   const map = new Map<string, string>();
 
   try {
-    const dirs = readdirSync(PROJECT_ROOT).filter((d) => {
-      try {
-        return statSync(join(PROJECT_ROOT, d)).isDirectory();
-      } catch {
-        return false;
-      }
-    });
+    const dirs = readdirSync(PROJECT_ROOT).filter((d) =>
+      isDirectory(join(PROJECT_ROOT, d))
+    );
 
     for (const dir of dirs) {
       const slug = resolveSlug(join(PROJECT_ROOT, dir));
-      if (slug) {
-        map.set(dir, slug);
-      }
+      if (slug) map.set(dir, slug);
     }
   } catch {
     // PROJECT_ROOT doesn't exist or isn't readable
@@ -97,5 +95,5 @@ export function buildSlugMap(): Map<string, string> {
  * Call before refreshing the slug map.
  */
 export function clearSlugCache(): void {
-  cache.clear();
+  slugCache.clear();
 }
