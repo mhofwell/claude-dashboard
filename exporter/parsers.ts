@@ -47,8 +47,7 @@ const EMOJI_TYPE_MAP: Record<string, string> = {
   "💬": "message",
 };
 
-// Ordered for priority matching (check more specific emojis first)
-const EMOJI_SEARCH_ORDER = Object.keys(EMOJI_TYPE_MAP);
+const EMOJI_KEYS = Object.keys(EMOJI_TYPE_MAP);
 
 // ─── Log entry type ────────────────────────────────────────────────────────
 
@@ -63,6 +62,15 @@ export interface LogEntry {
 }
 
 // ─── Timestamp parsing ─────────────────────────────────────────────────────
+
+/** Convert 12-hour format to 24-hour. */
+function to24Hour(hourStr: string, ampm: string): number {
+  let hour = parseInt(hourStr, 10);
+  const upper = ampm.toUpperCase();
+  if (upper === "PM" && hour !== 12) hour += 12;
+  if (upper === "AM" && hour === 12) hour = 0;
+  return hour;
+}
 
 /**
  * Parse timestamp strings from events.log.
@@ -84,16 +92,13 @@ export function parseTimestamp(ts: string): Date | null {
   );
   if (m) {
     const [, month, day, hourStr, min, sec, ampm] = m;
-    let hour = parseInt(hourStr);
-    if (ampm.toUpperCase() === "PM" && hour !== 12) hour += 12;
-    if (ampm.toUpperCase() === "AM" && hour === 12) hour = 0;
     return new Date(
       year,
-      parseInt(month) - 1,
-      parseInt(day),
-      hour,
-      parseInt(min),
-      sec ? parseInt(sec) : 0
+      parseInt(month, 10) - 1,
+      parseInt(day, 10),
+      to24Hour(hourStr, ampm),
+      parseInt(min, 10),
+      sec ? parseInt(sec, 10) : 0
     );
   }
 
@@ -101,16 +106,13 @@ export function parseTimestamp(ts: string): Date | null {
   m = ts.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)$/i);
   if (m) {
     const [, hourStr, min, sec, ampm] = m;
-    let hour = parseInt(hourStr);
-    if (ampm.toUpperCase() === "PM" && hour !== 12) hour += 12;
-    if (ampm.toUpperCase() === "AM" && hour === 12) hour = 0;
     return new Date(
       year,
       now.getMonth(),
       now.getDate(),
-      hour,
-      parseInt(min),
-      sec ? parseInt(sec) : 0
+      to24Hour(hourStr, ampm),
+      parseInt(min, 10),
+      sec ? parseInt(sec, 10) : 0
     );
   }
 
@@ -142,7 +144,7 @@ export function parseLogLine(rawLine: string): LogEntry | null {
   // Find the first matching emoji
   let emoji = "";
   let eventType = "unknown";
-  for (const e of EMOJI_SEARCH_ORDER) {
+  for (const e of EMOJI_KEYS) {
     if (event.includes(e)) {
       emoji = e;
       eventType = EMOJI_TYPE_MAP[e];
@@ -206,14 +208,12 @@ export class LogTailer {
   }
 
   private parseLines(data: string): LogEntry[] {
-    const entries: LogEntry[] = [];
-    for (const line of data.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const entry = parseLogLine(trimmed);
-      if (entry) entries.push(entry);
-    }
-    return entries;
+    return data
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map(parseLogLine)
+      .filter((entry): entry is LogEntry => entry !== null);
   }
 }
 
@@ -230,21 +230,19 @@ export interface ModelStats {
 
 export function readModelStats(): ModelStats[] {
   try {
-    const models: ModelStats[] = [];
-    for (const line of readFileSync(MODEL_FILE, "utf-8").trim().split("\n")) {
-      const parts = line.trim().split(/\s+/);
-      if (parts.length >= 6) {
-        models.push({
-          model: parts[0],
-          total: parseInt(parts[1]),
-          input: parseInt(parts[2]),
-          cacheWrite: parseInt(parts[3]),
-          cacheRead: parseInt(parts[4]),
-          output: parseInt(parts[5]),
-        });
-      }
-    }
-    return models;
+    return readFileSync(MODEL_FILE, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => line.trim().split(/\s+/))
+      .filter((parts) => parts.length >= 6)
+      .map((parts) => ({
+        model: parts[0],
+        total: parseInt(parts[1], 10),
+        input: parseInt(parts[2], 10),
+        cacheWrite: parseInt(parts[3], 10),
+        cacheRead: parseInt(parts[4], 10),
+        output: parseInt(parts[5], 10),
+      }));
   } catch {
     return [];
   }

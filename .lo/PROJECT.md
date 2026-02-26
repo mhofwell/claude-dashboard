@@ -15,7 +15,6 @@ stack:
   - Rich
   - TypeScript
   - Bun
-infrastructure:
   - Supabase
 agents:
   - name: "claude-code"
