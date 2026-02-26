@@ -60,7 +60,9 @@ export async function upsertProject(
     .upsert(
       {
         content_slug: slug,
-        visibility,
+        visibility: visibility === "public" ? "public" : "private",
+        classification: visibility === "public" ? "public" : "private",
+        status: "explore",
         first_seen: now.toISOString(),
         last_active: now.toISOString(),
         local_names: [],
@@ -74,12 +76,16 @@ export async function upsertProject(
 
   if (error) {
     // Upsert failed (e.g. first_seen immutable) — fall back to updating last_active
-    const { data: fallback } = await supabase
+    const { data: fallback, error: updateError } = await supabase
       .from("projects")
       .update({ last_active: now.toISOString(), visibility })
       .eq("content_slug", slug)
       .select("local_names")
       .single();
+    if (updateError) {
+      console.error(`  Failed to register project ${slug}:`, error.message);
+      return;
+    }
     localNames = fallback?.local_names as string[] ?? null;
   }
 
