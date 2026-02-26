@@ -502,6 +502,10 @@ class ProjectTokenScanner:
     def all_projects(self) -> list[str]:
         return sorted({proj for _fp, (proj, _dates) in self._file_data.items() if proj})
 
+    def lorf_projects(self) -> set[str]:
+        """Return project names whose session files live under a looselyorganized path."""
+        return {proj for fp, (proj, _dates) in self._file_data.items() if "looselyorganized" in fp and proj}
+
 
 def _format_tokens(n: int) -> str:
     """Format token count as B/M/K."""
@@ -1154,6 +1158,8 @@ class ClaudeDashboardApp(App):
         self._stats_time_range: str = "Today"
         self._time_range_options: list[str] = ["Today", "7d", "All"]
         self._daily_tokens_page: int = 0
+        self._lorf_scope: bool = False
+        self._lorf_projects: set[str] = set()
         # Sidebar cache — avoid recomputing on every 0.5s tick
         self._sidebar_entry_count: int = 0
         self._sidebar_scan_gen: int = 0  # bumped each process scan
@@ -1193,6 +1199,7 @@ class ClaudeDashboardApp(App):
         self.tailer.load_existing()
         self.scanner.scan()
         self._discover_projects()
+        self._lorf_projects = self._project_token_scanner.lorf_projects()
         self._rebuild_log()
         self._update_sidebar()
         self._update_header()
@@ -1839,6 +1846,7 @@ class ClaudeDashboardApp(App):
     def _reload_stats_cache(self) -> None:
         self._stats_cache = load_stats_cache()
         self._project_token_scanner.scan_incremental()
+        self._lorf_projects = self._project_token_scanner.lorf_projects()
         if self._is_stats_tab():
             self._refresh_stats_tab()
 
