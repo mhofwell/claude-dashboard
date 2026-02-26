@@ -1263,8 +1263,9 @@ class ClaudeDashboardApp(App):
         mem = self.scanner.total_mem_mb
         mem_str = f"{mem / 1024:.1f}GB" if mem >= 1024 else f"{mem:.0f}MB"
         header = self.query_one("#header-bar", Static)
+        scope_label = "  │  [LORF]" if self._lorf_scope else ""
         header.update(
-            f" 🟢 Claude Dashboard  │  {total} instances ({active} active)  │  {mem_str} RAM  │  {now}"
+            f" 🟢 Claude Dashboard  │  {total} instances ({active} active)  │  {mem_str} RAM  │  {now}{scope_label}"
         )
 
     # ─── Polling ──────────────────────────────────────────────────────────
@@ -1838,6 +1839,8 @@ class ClaudeDashboardApp(App):
 
     def _update_filter_indicators(self) -> None:
         filters = []
+        if self._lorf_scope:
+            filters.append("scope:LORF")
         if self.project_filter:
             filters.append(f"project:{self.project_filter}")
         if self.event_type_filter:
@@ -2308,6 +2311,7 @@ class ClaudeDashboardApp(App):
         self.project_filter = ""
         self.event_type_filter = ""
         self.compact_mode = False
+        self._lorf_scope = False
         self._project_idx = 0
         self._event_type_idx = 0
         if self._is_live_tab():
