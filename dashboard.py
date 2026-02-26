@@ -1938,6 +1938,34 @@ class ClaudeDashboardApp(App):
             self.query_one("#stats-summary", Static).update(box)
             return
 
+        # LORF scope (no specific project): aggregate across LORF projects
+        if self._lorf_scope and not self.project_filter:
+            entries = self._filter_entries_by_scope(self._filter_entries_by_time(self.tailer.all_entries))
+            sessions = 0
+            messages = 0
+            dates_seen: set[str] = set()
+            for entry in entries:
+                if "🟢" in entry.event and "Session started" in entry.event:
+                    sessions += 1
+                if "🏁" in entry.event:
+                    messages += 1
+                m = re.match(r"(\d{2}/\d{2})", entry.timestamp.strip())
+                if m:
+                    dates_seen.add(m.group(1))
+            days_active = len(dates_seen)
+
+            box = Text()
+            box.append(f"  LORF Projects ({title_label})\n", style="bold #5fafff")
+            box.append(f"  {sessions:,} sessions", style="bold")
+            box.append("  |  ", style="dim")
+            box.append(f"{messages:,} messages", style="bold")
+            if days_active > 1:
+                box.append("  |  ", style="dim")
+                box.append(f"{days_active} days active", style="bold")
+            box.append("\n")
+            self.query_one("#stats-summary", Static).update(box)
+            return
+
         daily = self._filter_daily_by_range(data.get("dailyActivity", []))
 
         if rng == "All":
