@@ -2040,15 +2040,16 @@ class ClaudeDashboardApp(App):
         date_filter = self._get_daily_token_dates()
         today_str = datetime.now().strftime("%Y-%m-%d")
 
+        lorf_set = self._lorf_projects if self._lorf_scope else None
         if date_filter is not None:
             # Today / 7d — use JSONL scanner for accurate daily totals
-            filtered = self._project_token_scanner.get_global_daily(date_filter)
+            filtered = self._project_token_scanner.get_global_daily(date_filter, lorf_set)
         else:
             # All Time — use stats-cache's dailyModelTokens, supplement today from scanner
             daily_model = data.get("dailyModelTokens", [])
             filtered = self._filter_daily_by_range(daily_model)
             if self._is_cache_stale_for_today():
-                scanner_today = self._project_token_scanner.get_global_daily({today_str})
+                scanner_today = self._project_token_scanner.get_global_daily({today_str}, lorf_set)
                 if scanner_today:
                     # Replace or add today's entry with scanner data
                     filtered = [d for d in filtered if d.get("date") != today_str]
@@ -2078,9 +2079,10 @@ class ClaudeDashboardApp(App):
 
         filtered.sort(key=lambda d: d.get("date", ""), reverse=True)
 
+        scope_label = " — LORF" if self._lorf_scope else ""
         table = Table(
             show_header=True, show_edge=False, box=None, padding=(0, 1),
-            title=f"[bold]🪙 Daily Token Usage ({title_label})[/]", title_style="bold",
+            title=f"[bold]🪙 Daily Token Usage ({title_label}{scope_label})[/]", title_style="bold",
             expand=True,
         )
         table.add_column("Date", style="dim", width=12)
