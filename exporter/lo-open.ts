@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 /**
- * LORF Facility Startup Command
+ * LO Facility Startup Command
  *
  * Preflight checks, launchd management, health verification, status flip.
  * Only sets facility to "open" when the entire telemetry pipeline is verified healthy.
  *
  * Usage:
- *   bun run lorf-open.ts
+ *   bun run lo-open.ts
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
@@ -19,14 +19,14 @@ import { $ } from "bun";
 const EXPORTER_DIR = dirname(new URL(import.meta.url).pathname);
 const ENV_FILE = join(EXPORTER_DIR, ".env");
 const PID_FILE = join(EXPORTER_DIR, ".exporter.pid");
-const PLIST_NAME = "com.lorf.telemetry-exporter.plist";
+const PLIST_NAME = "com.lo.telemetry-exporter.plist";
 const PLIST_SOURCE = join(EXPORTER_DIR, PLIST_NAME);
 const PLIST_DEST = join(
   process.env.HOME!,
   "Library/LaunchAgents",
   PLIST_NAME
 );
-const ERR_LOG = join(process.env.HOME!, ".claude/lorf-exporter.err");
+const ERR_LOG = join(process.env.HOME!, ".claude/lo-exporter.err");
 const SITE_URL = "https://looselyorganized.org";
 
 // ─── Visual Output ──────────────────────────────────────────────────────────
@@ -42,7 +42,7 @@ const CREAM = "\x1b[38;5;223m";
 function header() {
   console.log();
   console.log(`${DIM}┌─────────────────────────────────────────┐${RESET}`);
-  console.log(`${DIM}│${RESET}  ${BOLD}LORF — Opening Research Facility${RESET}       ${DIM}│${RESET}`);
+  console.log(`${DIM}│${RESET}  ${BOLD}LO — Opening Research Facility${RESET}         ${DIM}│${RESET}`);
   console.log(`${DIM}└─────────────────────────────────────────┘${RESET}`);
   console.log();
 }
@@ -259,10 +259,10 @@ async function checkLaunchd(): Promise<void> {
   try {
     const result = await $`launchctl list`.quiet();
     const output = result.stdout.toString();
-    const isLoaded = output.includes("com.lorf.telemetry-exporter");
+    const isLoaded = output.includes("com.lo.telemetry-exporter");
 
     if (isLoaded) {
-      pass("Launchd", "Service loaded (com.lorf.telemetry-exporter)");
+      pass("Launchd", "Service loaded (com.lo.telemetry-exporter)");
       return;
     }
   } catch {
@@ -281,7 +281,7 @@ async function checkLaunchd(): Promise<void> {
       fail("Launchd", `launchctl load failed`);
       abort(
         `launchctl load returned: ${stderr.trim() || err.message}`,
-        "Try manually: launchctl load ~/Library/LaunchAgents/com.lorf.telemetry-exporter.plist"
+        "Try manually: launchctl load ~/Library/LaunchAgents/com.lo.telemetry-exporter.plist"
       );
     }
   }

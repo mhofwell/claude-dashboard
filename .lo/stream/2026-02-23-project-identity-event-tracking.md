@@ -5,4 +5,4 @@ title: "Project identity and event tracking"
 commits: 8
 ---
 
-Unified project identity under `content_slug`. Added LORF-only filtering to skip non-LORF projects. Added message event tracking with `💬` emoji type. Initialized `.lorf/` project structure.
+Unified project identity under `content_slug`. Added LO-only filtering to skip non-LO projects. Added message event tracking with `💬` emoji type. Initialized `.lo/` project structure.

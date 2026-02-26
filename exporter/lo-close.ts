@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 /**
- * LORF Facility Close Command
+ * LO Facility Close Command
  *
  * Graceful shutdown: flips status to dormant, stops the exporter,
  * unloads the launchd service.
  *
  * Usage:
- *   bun run lorf-close.ts
+ *   bun run lo-close.ts
  */
 
 import { createClient } from "@supabase/supabase-js";
@@ -19,7 +19,7 @@ import { $ } from "bun";
 const EXPORTER_DIR = dirname(new URL(import.meta.url).pathname);
 const ENV_FILE = join(EXPORTER_DIR, ".env");
 const PID_FILE = join(EXPORTER_DIR, ".exporter.pid");
-const PLIST_NAME = "com.lorf.telemetry-exporter.plist";
+const PLIST_NAME = "com.lo.telemetry-exporter.plist";
 const PLIST_DEST = join(
   process.env.HOME!,
   "Library/LaunchAgents",
@@ -38,7 +38,7 @@ const BOLD = "\x1b[1m";
 function header() {
   console.log();
   console.log(`${DIM}┌─────────────────────────────────────────┐${RESET}`);
-  console.log(`${DIM}│${RESET}  ${BOLD}LORF — Closing Research Facility${RESET}       ${DIM}│${RESET}`);
+  console.log(`${DIM}│${RESET}  ${BOLD}LO — Closing Research Facility${RESET}         ${DIM}│${RESET}`);
   console.log(`${DIM}└─────────────────────────────────────────┘${RESET}`);
   console.log();
 }
@@ -164,7 +164,7 @@ async function main() {
   // 3. Unload launchd service (prevents auto-restart)
   try {
     const result = await $`launchctl list`.quiet();
-    const isLoaded = result.stdout.toString().includes("com.lorf.telemetry-exporter");
+    const isLoaded = result.stdout.toString().includes("com.lo.telemetry-exporter");
 
     if (isLoaded) {
       await $`launchctl unload ${PLIST_DEST}`.quiet();
@@ -180,7 +180,7 @@ async function main() {
   console.log();
   console.log(`  ${DIM}── Facility Closed ────────────────────${RESET}`);
   console.log(`  ${BOLD}Exporter:${RESET} stopped`);
-  console.log(`  ${BOLD}Launchd:${RESET} unloaded (lorf-open will reload)`);
+  console.log(`  ${BOLD}Launchd:${RESET} unloaded (lo-open will reload)`);
   console.log();
 }
 

@@ -1,8 +1,8 @@
 /**
- * Slug resolver for the LORF telemetry exporter.
+ * Slug resolver for the LO telemetry exporter.
  *
  * Maps project directory paths to their content_slug by reading
- * .lorf/project.md frontmatter. Only LORF projects (those with .lorf/)
+ * .lo/project.md frontmatter. Only LO projects (those with .lo/)
  * are tracked — all others are silently ignored.
  */
 
@@ -34,15 +34,15 @@ function parseFrontmatter(content: string): Record<string, string> {
 
 /**
  * Resolve a project directory path to its content_slug.
- * Returns null if the project has no .lorf/ directory (opt-in signal).
- * When .lorf/ is added later, the exporter picks it up on the next slug map
+ * Returns null if the project has no .lo/ directory (opt-in signal).
+ * When .lo/ is added later, the exporter picks it up on the next slug map
  * refresh and retroactively backfills all historical telemetry from JSONL.
  */
 export function resolveSlug(projectDir: string): string | null {
   if (cache.has(projectDir)) return cache.get(projectDir)!;
 
-  const lorfDir = join(projectDir, ".lorf");
-  if (!existsSync(lorfDir)) {
+  const loDir = join(projectDir, ".lo");
+  if (!existsSync(loDir)) {
     cache.set(projectDir, null);
     return null;
   }
@@ -50,12 +50,12 @@ export function resolveSlug(projectDir: string): string | null {
   let slug = basename(projectDir);
 
   try {
-    const lorfPath = join(lorfDir, "project.md");
-    const content = readFileSync(lorfPath, "utf-8");
+    const loPath = join(loDir, "project.md");
+    const content = readFileSync(loPath, "utf-8");
     const fm = parseFrontmatter(content);
     slug = fm.content_slug ?? fm.slug ?? slug;
   } catch {
-    // .lorf/ exists but no project.md — use directory basename
+    // .lo/ exists but no project.md — use directory basename
   }
 
   cache.set(projectDir, slug);
@@ -64,7 +64,7 @@ export function resolveSlug(projectDir: string): string | null {
 
 /**
  * Build a complete directory-name-to-slug mapping.
- * Only includes LORF projects (those with .lorf/ directories).
+ * Only includes LO projects (those with .lo/ directories).
  * Called at startup + refreshed every 10 cycles (5 min at 30s intervals).
  */
 export function buildSlugMap(): Map<string, string> {

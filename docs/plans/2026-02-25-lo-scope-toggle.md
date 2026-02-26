@@ -1,10 +1,10 @@
-# LORF Scope Toggle Implementation Plan
+# LO Scope Toggle Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Add an `l` key toggle that filters the entire dashboard to show only projects under the `looselyorganized` namespace.
 
-**Architecture:** A binary scope state (`_lorf_scope`) gates all data views. LORF project names are derived from `~/.claude/projects/` directory paths containing `looselyorganized`. The scope composes with existing project (`p`) and time range (`t`) filters as an independent layer.
+**Architecture:** A binary scope state (`_lo_scope`) gates all data views. LO project names are derived from `~/.claude/projects/` directory paths containing `looselyorganized`. The scope composes with existing project (`p`) and time range (`t`) filters as an independent layer.
 
 **Tech Stack:** Python/Textual (same as existing dashboard)
 
@@ -12,32 +12,32 @@
 
 ---
 
-### Task 1: Add LORF project scanning
+### Task 1: Add LO project scanning
 
 **Files:**
 - Modify: `dashboard.py:328-503` (ProjectTokenScanner — add method)
 - Modify: `dashboard.py:1140-1161` (__init__ — add state)
 - Modify: `dashboard.py:1192-1198` (on_mount — call scanner)
 
-**Step 1: Add `lorf_projects()` method to ProjectTokenScanner**
+**Step 1: Add `lo_projects()` method to ProjectTokenScanner**
 
 After the `all_projects` method (line 503), add:
 
 ```python
-def lorf_projects(self) -> set[str]:
+def lo_projects(self) -> set[str]:
     """Return project names whose session files live under a looselyorganized path."""
     return {proj for fp, (proj, _dates) in self._file_data.items() if "looselyorganized" in fp and proj}
 ```
 
-This leverages the scanner's existing `_file_data` which maps `filepath → (project_name, dates)`. File paths under `~/.claude/projects/` encode the full CWD, so checking for `"looselyorganized"` in the path identifies LORF projects.
+This leverages the scanner's existing `_file_data` which maps `filepath → (project_name, dates)`. File paths under `~/.claude/projects/` encode the full CWD, so checking for `"looselyorganized"` in the path identifies LO projects.
 
 **Step 2: Add state to `__init__`**
 
 After line 1156 (`self._daily_tokens_page`), add:
 
 ```python
-self._lorf_scope: bool = False
-self._lorf_projects: set[str] = set()
+self._lo_scope: bool = False
+self._lo_projects: set[str] = set()
 ```
 
 **Step 3: Populate on mount**
@@ -45,15 +45,15 @@ self._lorf_projects: set[str] = set()
 In `on_mount` (after line 1195 `self._discover_projects()`), add:
 
 ```python
-self._lorf_projects = self._project_token_scanner.lorf_projects()
+self._lo_projects = self._project_token_scanner.lo_projects()
 ```
 
-**Step 4: Refresh LORF set when scanner runs**
+**Step 4: Refresh LO set when scanner runs**
 
 In `_reload_stats_cache` (line 1841, after `self._project_token_scanner.scan_incremental()`), add:
 
 ```python
-self._lorf_projects = self._project_token_scanner.lorf_projects()
+self._lo_projects = self._project_token_scanner.lo_projects()
 ```
 
 **Step 5: Verify**
@@ -64,7 +64,7 @@ Run `python3 dashboard.py`, confirm it starts without errors. No visible change 
 
 ```bash
 git add dashboard.py
-git commit -m "feat: add LORF project scanning from session file paths"
+git commit -m "feat: add LO project scanning from session file paths"
 ```
 
 ---
@@ -81,7 +81,7 @@ git commit -m "feat: add LORF project scanning from session file paths"
 After the `t` binding (line 1124), add:
 
 ```python
-Binding("l", "toggle_lorf_scope", "LORF", show=True),
+Binding("l", "toggle_lo_scope", "LO", show=True),
 ```
 
 **Step 2: Add action method**
@@ -89,9 +89,9 @@ Binding("l", "toggle_lorf_scope", "LORF", show=True),
 After `action_cycle_time_range` (after line 2176), add:
 
 ```python
-def action_toggle_lorf_scope(self) -> None:
-    """Toggle LORF scope filter."""
-    self._lorf_scope = not self._lorf_scope
+def action_toggle_lo_scope(self) -> None:
+    """Toggle LO scope filter."""
+    self._lo_scope = not self._lo_scope
     self._project_idx = 0
     self.project_filter = ""
     self._daily_tokens_page = 0
@@ -103,29 +103,29 @@ def action_toggle_lorf_scope(self) -> None:
         self._refresh_instances_tab()
 ```
 
-**Step 3: Include LORF in active filters check**
+**Step 3: Include LO in active filters check**
 
-Modify `_has_active_filters` (line 1276-1277) to include LORF scope:
+Modify `_has_active_filters` (line 1276-1277) to include LO scope:
 
 ```python
 def _has_active_filters(self) -> bool:
-    return bool(self.text_filter or self.project_filter or self.event_type_filter or self._stats_time_range != "All" or self._lorf_scope)
+    return bool(self.text_filter or self.project_filter or self.event_type_filter or self._stats_time_range != "All" or self._lo_scope)
 ```
 
 **Step 4: Verify**
 
-Run dashboard, press `l`. Footer should show LORF binding. No data filtering yet but toggle should work without errors.
+Run dashboard, press `l`. Footer should show LO binding. No data filtering yet but toggle should work without errors.
 
 **Step 5: Commit**
 
 ```bash
 git add dashboard.py
-git commit -m "feat: add l keybinding and toggle action for LORF scope"
+git commit -m "feat: add l keybinding and toggle action for LO scope"
 ```
 
 ---
 
-### Task 3: Filter event log entries by LORF scope
+### Task 3: Filter event log entries by LO scope
 
 **Files:**
 - Modify: `dashboard.py:1281-1301` (_rebuild_log)
@@ -138,10 +138,10 @@ After `_filter_entries_by_time` (after line 1391), add:
 
 ```python
 def _filter_entries_by_scope(self, entries: list[LogEntry]) -> list[LogEntry]:
-    """Filter entries to LORF projects only when scope is active."""
-    if not self._lorf_scope:
+    """Filter entries to LO projects only when scope is active."""
+    if not self._lo_scope:
         return entries
-    return [e for e in entries if e.project in self._lorf_projects]
+    return [e for e in entries if e.project in self._lo_projects]
 ```
 
 **Step 2: Apply scope filter in `_rebuild_log`**
@@ -188,18 +188,18 @@ live_entries = self._filter_entries_by_scope(self._filter_entries_by_time(self.t
 
 **Step 5: Verify**
 
-Run dashboard, press `l`. Live tab log should only show events from LORF projects. Sidebar event counts should reflect LORF-only data. Press `l` again to toggle back to All.
+Run dashboard, press `l`. Live tab log should only show events from LO projects. Sidebar event counts should reflect LO-only data. Press `l` again to toggle back to All.
 
 **Step 6: Commit**
 
 ```bash
 git add dashboard.py
-git commit -m "feat: filter event log and sidebar by LORF scope"
+git commit -m "feat: filter event log and sidebar by LO scope"
 ```
 
 ---
 
-### Task 4: Scope project cycling to LORF projects
+### Task 4: Scope project cycling to LO projects
 
 **Files:**
 - Modify: `dashboard.py:2199-2214` (action_cycle_project)
@@ -213,7 +213,7 @@ def action_cycle_project(self) -> None:
     """Cycle project filter: All → proj1 → proj2 → ... → All."""
     if self._is_live_tab() and self.query_one("#filter-input", Input).has_focus:
         return
-    projects = [p for p in self._projects if p in self._lorf_projects] if self._lorf_scope else self._projects
+    projects = [p for p in self._projects if p in self._lo_projects] if self._lo_scope else self._projects
     if not projects:
         return
     self._project_idx = (self._project_idx + 1) % (len(projects) + 1)
@@ -230,13 +230,13 @@ def action_cycle_project(self) -> None:
 
 **Step 2: Verify**
 
-Run dashboard, press `l` then `p` repeatedly. Should only cycle through LORF projects. Press `l` again, then `p` — should cycle through all projects.
+Run dashboard, press `l` then `p` repeatedly. Should only cycle through LO projects. Press `l` again, then `p` — should cycle through all projects.
 
 **Step 3: Commit**
 
 ```bash
 git add dashboard.py
-git commit -m "feat: scope project cycling to LORF projects when scope active"
+git commit -m "feat: scope project cycling to LO projects when scope active"
 ```
 
 ---
@@ -291,9 +291,9 @@ def get_global_daily(self, date_filter: set[str] | None, project_set: set[str] |
     return [{"date": d, "tokensByModel": m} for d, m in sorted(daily.items(), reverse=True)]
 ```
 
-**Step 3: Pass LORF scope to token panel**
+**Step 3: Pass LO scope to token panel**
 
-In `_update_token_panel` (lines 1497-1538), the non-project-filter branch (line 1515 onward) calls `get_global_totals`. Add the LORF project set:
+In `_update_token_panel` (lines 1497-1538), the non-project-filter branch (line 1515 onward) calls `get_global_totals`. Add the LO project set:
 
 Change line 1531 from:
 
@@ -304,11 +304,11 @@ model_totals = self._project_token_scanner.get_global_totals(date_filter)
 to:
 
 ```python
-lorf_set = self._lorf_projects if self._lorf_scope else None
-model_totals = self._project_token_scanner.get_global_totals(date_filter, lorf_set)
+lo_set = self._lo_projects if self._lo_scope else None
+model_totals = self._project_token_scanner.get_global_totals(date_filter, lo_set)
 ```
 
-Also update the title (line 1515) to show LORF label when active. Change:
+Also update the title (line 1515) to show LO label when active. Change:
 
 ```python
 table = self._make_token_table(f"[bold]🪙 Tokens ({title_label})[/]")
@@ -317,19 +317,19 @@ table = self._make_token_table(f"[bold]🪙 Tokens ({title_label})[/]")
 to:
 
 ```python
-scope_label = " — LORF" if self._lorf_scope else ""
+scope_label = " — LO" if self._lo_scope else ""
 table = self._make_token_table(f"[bold]🪙 Tokens ({title_label}{scope_label})[/]")
 ```
 
 **Step 4: Verify**
 
-Run dashboard, press `l`. Token panel in sidebar should show only LORF project tokens. Toggle back — should show all.
+Run dashboard, press `l`. Token panel in sidebar should show only LO project tokens. Toggle back — should show all.
 
 **Step 5: Commit**
 
 ```bash
 git add dashboard.py
-git commit -m "feat: scope sidebar token panel to LORF projects"
+git commit -m "feat: scope sidebar token panel to LO projects"
 ```
 
 ---
@@ -339,13 +339,13 @@ git commit -m "feat: scope sidebar token panel to LORF projects"
 **Files:**
 - Modify: `dashboard.py:1885-1972` (_update_stats_summary)
 
-**Step 1: Add LORF-scoped summary path**
+**Step 1: Add LO-scoped summary path**
 
-In `_update_stats_summary`, after the project_filter branch (line 1918) and before the global branch (line 1920), add a LORF scope branch. The modified method should have this structure after line 1918:
+In `_update_stats_summary`, after the project_filter branch (line 1918) and before the global branch (line 1920), add a LO scope branch. The modified method should have this structure after line 1918:
 
 ```python
-        # LORF scope (no specific project): aggregate across LORF projects
-        if self._lorf_scope and not self.project_filter:
+        # LO scope (no specific project): aggregate across LO projects
+        if self._lo_scope and not self.project_filter:
             entries = self._filter_entries_by_scope(self._filter_entries_by_time(self.tailer.all_entries))
             sessions = 0
             messages = 0
@@ -361,7 +361,7 @@ In `_update_stats_summary`, after the project_filter branch (line 1918) and befo
             days_active = len(dates_seen)
 
             box = Text()
-            box.append(f"  LORF Projects ({title_label})\n", style="bold #5fafff")
+            box.append(f"  LO Projects ({title_label})\n", style="bold #5fafff")
             box.append(f"  {sessions:,} sessions", style="bold")
             box.append("  |  ", style="dim")
             box.append(f"{messages:,} messages", style="bold")
@@ -375,13 +375,13 @@ In `_update_stats_summary`, after the project_filter branch (line 1918) and befo
 
 **Step 2: Verify**
 
-Run dashboard, press `2` (Stats tab), press `l`. Summary should show "LORF Projects" with aggregated counts. Toggle off — should show global.
+Run dashboard, press `2` (Stats tab), press `l`. Summary should show "LO Projects" with aggregated counts. Toggle off — should show global.
 
 **Step 3: Commit**
 
 ```bash
 git add dashboard.py
-git commit -m "feat: scope stats summary to LORF projects"
+git commit -m "feat: scope stats summary to LO projects"
 ```
 
 ---
@@ -391,7 +391,7 @@ git commit -m "feat: scope stats summary to LORF projects"
 **Files:**
 - Modify: `dashboard.py:1974-2083` (_update_daily_tokens_table)
 
-**Step 1: Pass LORF set to scanner calls**
+**Step 1: Pass LO set to scanner calls**
 
 In `_update_daily_tokens_table`, when not in project_filter mode:
 
@@ -404,8 +404,8 @@ filtered = self._project_token_scanner.get_global_daily(date_filter)
 to:
 
 ```python
-lorf_set = self._lorf_projects if self._lorf_scope else None
-filtered = self._project_token_scanner.get_global_daily(date_filter, lorf_set)
+lo_set = self._lo_projects if self._lo_scope else None
+filtered = self._project_token_scanner.get_global_daily(date_filter, lo_set)
 ```
 
 Change line 2002 from:
@@ -417,7 +417,7 @@ scanner_today = self._project_token_scanner.get_global_daily({today_str})
 to:
 
 ```python
-scanner_today = self._project_token_scanner.get_global_daily({today_str}, lorf_set)
+scanner_today = self._project_token_scanner.get_global_daily({today_str}, lo_set)
 ```
 
 Update the table title (line 2034) from:
@@ -429,19 +429,19 @@ title=f"[bold]🪙 Daily Token Usage ({title_label})[/]", title_style="bold",
 to:
 
 ```python
-scope_label = " — LORF" if self._lorf_scope else ""
+scope_label = " — LO" if self._lo_scope else ""
 title=f"[bold]🪙 Daily Token Usage ({title_label}{scope_label})[/]", title_style="bold",
 ```
 
 **Step 2: Verify**
 
-Run dashboard, Stats tab, press `l`. Daily tokens table should only show LORF project usage. Toggle off — full data.
+Run dashboard, Stats tab, press `l`. Daily tokens table should only show LO project usage. Toggle off — full data.
 
 **Step 3: Commit**
 
 ```bash
 git add dashboard.py
-git commit -m "feat: scope daily tokens table to LORF projects"
+git commit -m "feat: scope daily tokens table to LO projects"
 ```
 
 ---
@@ -451,13 +451,13 @@ git commit -m "feat: scope daily tokens table to LORF projects"
 **Files:**
 - Modify: `dashboard.py:1664-1779` (_refresh_instances_tab)
 
-**Step 1: Filter instances by LORF scope**
+**Step 1: Filter instances by LO scope**
 
 After line 1666 (`instances = self.scanner.instances`), add:
 
 ```python
-if self._lorf_scope:
-    instances = [i for i in instances if i.project_name in self._lorf_projects]
+if self._lo_scope:
+    instances = [i for i in instances if i.project_name in self._lo_projects]
 ```
 
 Recalculate totals from the filtered list. Change lines 1667-1669 from:
@@ -478,7 +478,7 @@ mem = sum(i.mem_mb for i in instances)
 
 (This makes the counts match the filtered list regardless of scope.)
 
-**Step 2: Update header to show LORF indicator**
+**Step 2: Update header to show LO indicator**
 
 Change line 1673 from:
 
@@ -489,19 +489,19 @@ header.append("  🖥️  Running Claude Instances ", style="bold")
 to:
 
 ```python
-scope_label = " (LORF)" if self._lorf_scope else ""
+scope_label = " (LO)" if self._lo_scope else ""
 header.append(f"  🖥️  Running Claude Instances{scope_label} ", style="bold")
 ```
 
 **Step 3: Verify**
 
-Run dashboard, press `3` (Instances tab), press `l`. Should only show LORF project instances.
+Run dashboard, press `3` (Instances tab), press `l`. Should only show LO project instances.
 
 **Step 4: Commit**
 
 ```bash
 git add dashboard.py
-git commit -m "feat: scope instances tab to LORF projects"
+git commit -m "feat: scope instances tab to LO projects"
 ```
 
 ---
@@ -513,45 +513,45 @@ git commit -m "feat: scope instances tab to LORF projects"
 - Modify: `dashboard.py:1816-1835` (_update_filter_indicators)
 - Modify: `dashboard.py:2234-2247` (action_clear_filters)
 
-**Step 1: Show LORF in header bar**
+**Step 1: Show LO in header bar**
 
-In `_update_header` (line 1254-1256), add LORF indicator:
+In `_update_header` (line 1254-1256), add LO indicator:
 
 ```python
-scope_label = "  │  [LORF]" if self._lorf_scope else ""
+scope_label = "  │  [LO]" if self._lo_scope else ""
 header.update(
     f" 🟢 Claude Dashboard  │  {total} instances ({active} active)  │  {mem_str} RAM  │  {now}{scope_label}"
 )
 ```
 
-**Step 2: Show LORF in filter indicators**
+**Step 2: Show LO in filter indicators**
 
-In `_update_filter_indicators` (line 1817), add LORF to the filters list:
+In `_update_filter_indicators` (line 1817), add LO to the filters list:
 
 After line 1817 (`filters = []`), add:
 
 ```python
-if self._lorf_scope:
-    filters.append("scope:LORF")
+if self._lo_scope:
+    filters.append("scope:LO")
 ```
 
-**Step 3: Clear LORF on escape**
+**Step 3: Clear LO on escape**
 
 In `action_clear_filters` (after line 2244), add:
 
 ```python
-self._lorf_scope = False
+self._lo_scope = False
 ```
 
 **Step 4: Verify**
 
-Run dashboard, press `l`. Header should show `[LORF]`. Filter indicator bar should show `scope:LORF`. Press `escape` — all filters including LORF should clear.
+Run dashboard, press `l`. Header should show `[LO]`. Filter indicator bar should show `scope:LO`. Press `escape` — all filters including LO should clear.
 
 **Step 5: Commit**
 
 ```bash
 git add dashboard.py
-git commit -m "feat: show LORF indicator in header and filter bar"
+git commit -m "feat: show LO indicator in header and filter bar"
 ```
 
 ---
@@ -562,14 +562,14 @@ git commit -m "feat: show LORF indicator in header and filter bar"
 
 Run `python3 dashboard.py` and verify:
 
-1. `l` toggles LORF scope on/off
-2. Live tab: only LORF project events shown when active
-3. Sidebar: event counts and tokens reflect LORF scope
-4. `p` cycles only LORF projects when scope active
-5. Stats tab: summary and daily tokens scoped to LORF
-6. Instances tab: only LORF instances shown
-7. Header shows `[LORF]` when active
-8. Filter bar shows `scope:LORF`
-9. `escape` clears LORF scope along with other filters
-10. `t` (time range) composes correctly with LORF scope
-11. `p` + `l` compose correctly (LORF scope + specific project)
+1. `l` toggles LO scope on/off
+2. Live tab: only LO project events shown when active
+3. Sidebar: event counts and tokens reflect LO scope
+4. `p` cycles only LO projects when scope active
+5. Stats tab: summary and daily tokens scoped to LO
+6. Instances tab: only LO instances shown
+7. Header shows `[LO]` when active
+8. Filter bar shows `scope:LO`
+9. `escape` clears LO scope along with other filters
+10. `t` (time range) composes correctly with LO scope
+11. `p` + `l` compose correctly (LO scope + specific project)

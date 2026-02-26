@@ -26,7 +26,7 @@ No tests or linting in either component.
 Two components that read the same `~/.claude/` telemetry files:
 
 1. **`dashboard.py`** — Single-file Python TUI (~2000 lines) for local monitoring
-2. **`exporter/`** — TypeScript/Bun daemon that syncs telemetry to Supabase (lorf-site project)
+2. **`exporter/`** — TypeScript/Bun daemon that syncs telemetry to Supabase (lo-site project)
 
 ### Data Sources
 
@@ -71,7 +71,7 @@ When the stats cache is stale (today's date ≠ `lastComputedDate`), the Stats t
 
 ## Exporter (`exporter/`)
 
-TypeScript/Bun daemon that reads the same `~/.claude/` files and pushes telemetry to the **lorf-site** Supabase project.
+TypeScript/Bun daemon that reads the same `~/.claude/` files and pushes telemetry to the **lo-site** Supabase project.
 
 ### Files
 

@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.lorf.telemetry-exporter</string>
+	<string>com.lo.telemetry-exporter</string>
 
 	<key>ProgramArguments</key>
 	<array>
@@ -25,9 +25,9 @@
 
 	<!-- Log stdout and stderr -->
 	<key>StandardOutPath</key>
-	<string>/Users/bigviking/.claude/lorf-exporter.log</string>
+	<string>/Users/bigviking/.claude/lo-exporter.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/bigviking/.claude/lorf-exporter.err</string>
+	<string>/Users/bigviking/.claude/lo-exporter.err</string>
 
 	<!-- Ensure PATH includes bun and standard locations -->
 	<key>EnvironmentVariables</key>

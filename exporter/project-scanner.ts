@@ -135,7 +135,7 @@ export function scanProjectTokens(): ProjectTokenMap {
 
     const projectSlug = resolveSlug(join(PROJECT_ROOT, projectName));
 
-    // Skip non-LORF projects
+    // Skip non-LO projects
     if (!projectSlug) continue;
 
     // Initialize dedup set for this slug
@@ -144,24 +144,44 @@ export function scanProjectTokens(): ProjectTokenMap {
     }
     const seenFiles = seenFilesBySlug.get(projectSlug)!;
 
-    // Find all .jsonl files in this project dir
-    let files: string[];
+    // Find all .jsonl files: top-level sessions + subagent sessions
+    let filePaths: { fullPath: string; dedupKey: string }[];
     try {
-      files = readdirSync(dirPath).filter((f) => f.endsWith(".jsonl"));
+      filePaths = [];
+      const entries = readdirSync(dirPath);
+      for (const entry of entries) {
+        if (entry.endsWith(".jsonl")) {
+          filePaths.push({ fullPath: join(dirPath, entry), dedupKey: entry });
+        } else {
+          // Check for subagent files in <session-uuid>/subagents/
+          try {
+            const subDir = join(dirPath, entry, "subagents");
+            for (const sf of readdirSync(subDir)) {
+              if (sf.endsWith(".jsonl")) {
+                filePaths.push({
+                  fullPath: join(subDir, sf),
+                  dedupKey: join(entry, "subagents", sf),
+                });
+              }
+            }
+          } catch {
+            // Not a session directory or no subagents — skip
+          }
+        }
+      }
     } catch {
       continue;
     }
 
-    for (const file of files) {
+    for (const { fullPath: filePath, dedupKey } of filePaths) {
       // File-level dedup: skip if we've already counted this session file for this slug
-      if (seenFiles.has(file)) {
+      if (seenFiles.has(dedupKey)) {
         dedupedFiles++;
         continue;
       }
-      seenFiles.add(file);
+      seenFiles.add(dedupKey);
 
       totalFiles++;
-      const filePath = join(dirPath, file);
 
       try {
         const content = readFileSync(filePath, "utf-8");

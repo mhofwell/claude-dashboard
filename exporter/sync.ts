@@ -1,6 +1,6 @@
 /**
  * Supabase sync layer.
- * Pushes parsed telemetry data to the lorf-site database.
+ * Pushes parsed telemetry data to the lo-site database.
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
@@ -58,6 +58,7 @@ export async function upsertProject(
         visibility,
         first_seen: now.toISOString(),
         last_active: now.toISOString(),
+        local_names: [],
       },
       { onConflict: "content_slug", ignoreDuplicates: false }
     )
@@ -410,7 +411,7 @@ export async function updateFacilityStatus(update: FacilityUpdate) {
   const { error } = await supabase
     .from("facility_status")
     .update({
-      // NOTE: status is NOT written here — it's owned by the manual switch (lorf-open/lorf-close)
+      // NOTE: status is NOT written here — it's owned by the manual switch (lo-open/lo-close)
       active_agents: update.activeAgents,
       active_projects: update.activeProjects,
       tokens_lifetime: update.tokensLifetime,
@@ -433,7 +434,7 @@ export async function updateFacilityStatus(update: FacilityUpdate) {
 
 /**
  * Set the facility open/close status.
- * Only called by lorf-open/lorf-close commands and the auto-close timer.
+ * Only called by lo-open/lo-close commands and the auto-close timer.
  */
 export async function setFacilitySwitch(status: "active" | "dormant") {
   const { error } = await supabase

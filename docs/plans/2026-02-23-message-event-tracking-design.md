@@ -305,7 +305,7 @@ ALTER TABLE project_telemetry
 
 **Step 2: Apply the migration via Supabase dashboard or CLI**
 
-Run the SQL in the Supabase SQL editor for the lorf-site project.
+Run the SQL in the Supabase SQL editor for the lo-site project.
 
 **Step 3: Commit**
 
