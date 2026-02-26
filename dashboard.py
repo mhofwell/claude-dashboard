@@ -1126,6 +1126,7 @@ class ClaudeDashboardApp(App):
         Binding("e", "cycle_event_type", "Event", show=True),
         Binding("c", "toggle_compact", "Compact", show=True),
         Binding("t", "cycle_time_range", "Time", show=True),
+        Binding("l", "toggle_lorf_scope", "LORF", show=True),
         Binding("n", "next_page", "Next Page", show=True),
         Binding("escape", "clear_filters", "Clear", show=True),
         Binding("j", "scroll_down", "Down", show=False),
@@ -1281,7 +1282,7 @@ class ClaudeDashboardApp(App):
             self._rebuild_log()
 
     def _has_active_filters(self) -> bool:
-        return bool(self.text_filter or self.project_filter or self.event_type_filter or self._stats_time_range != "All")
+        return bool(self.text_filter or self.project_filter or self.event_type_filter or self._stats_time_range != "All" or self._lorf_scope)
 
     # ─── Log rendering ────────────────────────────────────────────────────
 
@@ -2182,6 +2183,19 @@ class ClaudeDashboardApp(App):
         self._update_sidebar()
         if self._is_stats_tab():
             self._refresh_stats_tab()
+
+    def action_toggle_lorf_scope(self) -> None:
+        """Toggle LORF scope filter."""
+        self._lorf_scope = not self._lorf_scope
+        self._project_idx = 0
+        self.project_filter = ""
+        self._daily_tokens_page = 0
+        self._rebuild_log()
+        self._update_sidebar()
+        if self._is_stats_tab():
+            self._refresh_stats_tab()
+        if self._active_tab == "tab-instances":
+            self._refresh_instances_tab()
 
     def action_next_page(self) -> None:
         """Cycle to next page of daily token table (Stats tab)."""
