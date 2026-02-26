@@ -1684,13 +1684,16 @@ class ClaudeDashboardApp(App):
     def _refresh_instances_tab(self) -> None:
         """Full render of the Instances tab table with child process info."""
         instances = self.scanner.instances
+        if self._lorf_scope:
+            instances = [i for i in instances if i.project_name in self._lorf_projects]
         total = len(instances)
-        active = self.scanner.active_count
-        mem = self.scanner.total_mem_mb
+        active = sum(1 for i in instances if i.is_active)
+        mem = sum(i.mem_mb for i in instances)
 
         # Header bar
         header = Text()
-        header.append("  🖥️  Running Claude Instances ", style="bold")
+        scope_label = " (LORF)" if self._lorf_scope else ""
+        header.append(f"  🖥️  Running Claude Instances{scope_label} ", style="bold")
         header.append(f"({total})", style="bold")
         if active > 0:
             header.append(f"  •  {active} active", style="bold #87d787")
