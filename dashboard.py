@@ -1291,7 +1291,7 @@ class ClaudeDashboardApp(App):
         log_widget = self.query_one("#event-log", RichLog)
         log_widget.clear()
 
-        entries = self._filter_entries_by_time(self.tailer.all_entries)
+        entries = self._filter_entries_by_scope(self._filter_entries_by_time(self.tailer.all_entries))
         filtered = [
             e for e in entries
             if e.matches_filter(self.text_filter, self.project_filter, self.event_type_filter)
@@ -1398,6 +1398,12 @@ class ClaudeDashboardApp(App):
                 filtered.append(entry)
         return filtered
 
+    def _filter_entries_by_scope(self, entries: list[LogEntry]) -> list[LogEntry]:
+        """Filter entries to LORF projects only when scope is active."""
+        if not self._lorf_scope:
+            return entries
+        return [e for e in entries if e.project in self._lorf_projects]
+
     def _update_sidebar(self) -> None:
         """Update all sidebar panels. Also increments spinner for instances."""
         self._spinner_idx = (self._spinner_idx + 1) % len(BRAILLE_SPINNER)
@@ -1413,7 +1419,7 @@ class ClaudeDashboardApp(App):
         if data_changed:
             self._sidebar_entry_count = entry_count
             self._sidebar_scan_gen = scan_gen
-            filtered_entries = self._filter_entries_by_time(self.tailer.all_entries)
+            filtered_entries = self._filter_entries_by_scope(self._filter_entries_by_time(self.tailer.all_entries))
             raw_lines = [e.raw for e in filtered_entries]
             self._cached_event_counts = count_events(raw_lines)
             self._cached_sessions = build_agent_tree(self.tailer.all_entries)
@@ -1856,7 +1862,7 @@ class ClaudeDashboardApp(App):
 
         Returns (sessions, messages) for entries matching today's date.
         """
-        live_entries = self._filter_entries_by_time(self.tailer.all_entries)
+        live_entries = self._filter_entries_by_scope(self._filter_entries_by_time(self.tailer.all_entries))
         today_mmdd = datetime.now().strftime("%m/%d")
         sessions = 0
         messages = 0
