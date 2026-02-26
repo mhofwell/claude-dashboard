@@ -2227,14 +2227,15 @@ class ClaudeDashboardApp(App):
     def action_cycle_project(self) -> None:
         """Cycle project filter: All → proj1 → proj2 → ... → All."""
         if self._is_live_tab() and self.query_one("#filter-input", Input).has_focus:
-            return  # skip when typing in filter, but allow from Stats tab
-        if not self._projects:
             return
-        self._project_idx = (self._project_idx + 1) % (len(self._projects) + 1)
+        projects = [p for p in self._projects if p in self._lorf_projects] if self._lorf_scope else self._projects
+        if not projects:
+            return
+        self._project_idx = (self._project_idx + 1) % (len(projects) + 1)
         if self._project_idx == 0:
             self.project_filter = ""
         else:
-            self.project_filter = self._projects[self._project_idx - 1]
+            self.project_filter = projects[self._project_idx - 1]
         if self._is_live_tab():
             self._rebuild_log()
         if self._is_stats_tab():
