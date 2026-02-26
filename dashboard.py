@@ -506,7 +506,7 @@ class ProjectTokenScanner:
     def all_projects(self) -> list[str]:
         return sorted({proj for _fp, (proj, _dates) in self._file_data.items() if proj})
 
-    def lorf_projects(self) -> set[str]:
+    def lo_projects(self) -> set[str]:
         """Return project names whose session files live under a looselyorganized path."""
         return {proj for fp, (proj, _dates) in self._file_data.items() if "looselyorganized" in fp and proj}
 
@@ -1130,7 +1130,7 @@ class ClaudeDashboardApp(App):
         Binding("e", "cycle_event_type", "Event", show=True),
         Binding("c", "toggle_compact", "Compact", show=True),
         Binding("t", "cycle_time_range", "Time", show=True),
-        Binding("l", "toggle_lorf_scope", "LORF", show=True),
+        Binding("l", "toggle_lo_scope", "LO", show=True),
         Binding("n", "next_page", "Next Page", show=True),
         Binding("escape", "clear_filters", "Clear", show=True),
         Binding("j", "scroll_down", "Down", show=False),
@@ -1163,8 +1163,8 @@ class ClaudeDashboardApp(App):
         self._stats_time_range: str = "Today"
         self._time_range_options: list[str] = ["Today", "7d", "All"]
         self._daily_tokens_page: int = 0
-        self._lorf_scope: bool = False
-        self._lorf_projects: set[str] = set()
+        self._lo_scope: bool = False
+        self._lo_projects: set[str] = set()
         # Sidebar cache — avoid recomputing on every 0.5s tick
         self._sidebar_entry_count: int = 0
         self._sidebar_scan_gen: int = 0  # bumped each process scan
@@ -1204,7 +1204,7 @@ class ClaudeDashboardApp(App):
         self.tailer.load_existing()
         self.scanner.scan()
         self._discover_projects()
-        self._lorf_projects = self._project_token_scanner.lorf_projects()
+        self._lo_projects = self._project_token_scanner.lo_projects()
         self._rebuild_log()
         self._update_sidebar()
         self._update_header()
@@ -1263,7 +1263,7 @@ class ClaudeDashboardApp(App):
         mem = self.scanner.total_mem_mb
         mem_str = f"{mem / 1024:.1f}GB" if mem >= 1024 else f"{mem:.0f}MB"
         header = self.query_one("#header-bar", Static)
-        scope_label = "  │  [LORF]" if self._lorf_scope else ""
+        scope_label = "  │  [LO]" if self._lo_scope else ""
         header.update(
             f" 🟢 Claude Dashboard  │  {total} instances ({active} active)  │  {mem_str} RAM  │  {now}{scope_label}"
         )
@@ -1287,7 +1287,7 @@ class ClaudeDashboardApp(App):
             self._rebuild_log()
 
     def _has_active_filters(self) -> bool:
-        return bool(self.text_filter or self.project_filter or self.event_type_filter or self._stats_time_range != "All" or self._lorf_scope)
+        return bool(self.text_filter or self.project_filter or self.event_type_filter or self._stats_time_range != "All" or self._lo_scope)
 
     # ─── Log rendering ────────────────────────────────────────────────────
 
@@ -1404,10 +1404,10 @@ class ClaudeDashboardApp(App):
         return filtered
 
     def _filter_entries_by_scope(self, entries: list[LogEntry]) -> list[LogEntry]:
-        """Filter entries to LORF projects only when scope is active."""
-        if not self._lorf_scope:
+        """Filter entries to LO projects only when scope is active."""
+        if not self._lo_scope:
             return entries
-        return [e for e in entries if e.project in self._lorf_projects]
+        return [e for e in entries if e.project in self._lo_projects]
 
     def _update_sidebar(self) -> None:
         """Update all sidebar panels. Also increments spinner for instances."""
@@ -1531,13 +1531,13 @@ class ClaudeDashboardApp(App):
             self.query_one("#token-panel", Static).update(table)
             return
 
-        scope_label = " — LORF" if self._lorf_scope else ""
+        scope_label = " — LO" if self._lo_scope else ""
         table = self._make_token_table(f"[bold]🪙 Tokens ({title_label}{scope_label})[/]")
         date_filter = self._get_daily_token_dates()
-        lorf_set = self._lorf_projects if self._lorf_scope else None
+        lo_set = self._lo_projects if self._lo_scope else None
 
-        if date_filter is None:
-            # All Time — use modelUsage for full breakdown with cache ratios
+        if date_filter is None and not lo_set:
+            # All Time (no scope) — use modelUsage for full breakdown with cache ratios
             model_usage = self._stats_cache.get("modelUsage", {})
             models = []
             for model_id, usage in model_usage.items():
@@ -1548,8 +1548,8 @@ class ClaudeDashboardApp(App):
                 models.append((model_id, inp + out + cache_read + cache_write, cache_read, out))
             self._add_model_rows(table, models, empty_label="[dim]Waiting...[/]")
         else:
-            # Today / 7d — use JSONL scanner for accurate daily totals
-            model_totals = self._project_token_scanner.get_global_totals(date_filter, lorf_set)
+            # Today / 7d / scoped — use JSONL scanner for per-project accuracy
+            model_totals = self._project_token_scanner.get_global_totals(date_filter, lo_set)
             models = [
                 (mid, t["total"], t["cache_read"], t["output"])
                 for mid, t in model_totals.items()
@@ -1685,15 +1685,15 @@ class ClaudeDashboardApp(App):
     def _refresh_instances_tab(self) -> None:
         """Full render of the Instances tab table with child process info."""
         instances = self.scanner.instances
-        if self._lorf_scope:
-            instances = [i for i in instances if i.project_name in self._lorf_projects]
+        if self._lo_scope:
+            instances = [i for i in instances if i.project_name in self._lo_projects]
         total = len(instances)
         active = sum(1 for i in instances if i.is_active)
         mem = sum(i.mem_mb for i in instances)
 
         # Header bar
         header = Text()
-        scope_label = " (LORF)" if self._lorf_scope else ""
+        scope_label = " (LO)" if self._lo_scope else ""
         header.append(f"  🖥️  Running Claude Instances{scope_label} ", style="bold")
         header.append(f"({total})", style="bold")
         if active > 0:
@@ -1839,8 +1839,8 @@ class ClaudeDashboardApp(App):
 
     def _update_filter_indicators(self) -> None:
         filters = []
-        if self._lorf_scope:
-            filters.append("scope:LORF")
+        if self._lo_scope:
+            filters.append("scope:LO")
         if self.project_filter:
             filters.append(f"project:{self.project_filter}")
         if self.event_type_filter:
@@ -1865,7 +1865,7 @@ class ClaudeDashboardApp(App):
     def _reload_stats_cache(self) -> None:
         self._stats_cache = load_stats_cache()
         self._project_token_scanner.scan_incremental()
-        self._lorf_projects = self._project_token_scanner.lorf_projects()
+        self._lo_projects = self._project_token_scanner.lo_projects()
         if self._is_stats_tab():
             self._refresh_stats_tab()
 
@@ -1944,8 +1944,8 @@ class ClaudeDashboardApp(App):
             self.query_one("#stats-summary", Static).update(box)
             return
 
-        # LORF scope (no specific project): aggregate across LORF projects
-        if self._lorf_scope and not self.project_filter:
+        # LO scope (no specific project): aggregate across LO projects
+        if self._lo_scope and not self.project_filter:
             entries = self._filter_entries_by_scope(self._filter_entries_by_time(self.tailer.all_entries))
             sessions = 0
             messages = 0
@@ -1961,7 +1961,7 @@ class ClaudeDashboardApp(App):
             days_active = len(dates_seen)
 
             box = Text()
-            box.append(f"  LORF Projects ({title_label})\n", style="bold #5fafff")
+            box.append(f"  LO Projects ({title_label})\n", style="bold #5fafff")
             box.append(f"  {sessions:,} sessions", style="bold")
             box.append("  |  ", style="dim")
             box.append(f"{messages:,} messages", style="bold")
@@ -2046,16 +2046,16 @@ class ClaudeDashboardApp(App):
         date_filter = self._get_daily_token_dates()
         today_str = datetime.now().strftime("%Y-%m-%d")
 
-        lorf_set = self._lorf_projects if self._lorf_scope else None
-        if date_filter is not None:
-            # Today / 7d — use JSONL scanner for accurate daily totals
-            filtered = self._project_token_scanner.get_global_daily(date_filter, lorf_set)
+        lo_set = self._lo_projects if self._lo_scope else None
+        if date_filter is not None or lo_set:
+            # Today / 7d / scoped — use JSONL scanner for per-project accuracy
+            filtered = self._project_token_scanner.get_global_daily(date_filter, lo_set)
         else:
-            # All Time — use stats-cache's dailyModelTokens, supplement today from scanner
+            # All Time (no scope) — use stats-cache's dailyModelTokens, supplement today from scanner
             daily_model = data.get("dailyModelTokens", [])
             filtered = self._filter_daily_by_range(daily_model)
             if self._is_cache_stale_for_today():
-                scanner_today = self._project_token_scanner.get_global_daily({today_str}, lorf_set)
+                scanner_today = self._project_token_scanner.get_global_daily({today_str})
                 if scanner_today:
                     # Replace or add today's entry with scanner data
                     filtered = [d for d in filtered if d.get("date") != today_str]
@@ -2085,7 +2085,7 @@ class ClaudeDashboardApp(App):
 
         filtered.sort(key=lambda d: d.get("date", ""), reverse=True)
 
-        scope_label = " — LORF" if self._lorf_scope else ""
+        scope_label = " — LO" if self._lo_scope else ""
         table = Table(
             show_header=True, show_edge=False, box=None, padding=(0, 1),
             title=f"[bold]🪙 Daily Token Usage ({title_label}{scope_label})[/]", title_style="bold",
@@ -2232,9 +2232,9 @@ class ClaudeDashboardApp(App):
         if self._is_stats_tab():
             self._refresh_stats_tab()
 
-    def action_toggle_lorf_scope(self) -> None:
-        """Toggle LORF scope filter."""
-        self._lorf_scope = not self._lorf_scope
+    def action_toggle_lo_scope(self) -> None:
+        """Toggle LO scope filter."""
+        self._lo_scope = not self._lo_scope
         self._project_idx = 0
         self.project_filter = ""
         self._daily_tokens_page = 0
@@ -2270,7 +2270,7 @@ class ClaudeDashboardApp(App):
         """Cycle project filter: All → proj1 → proj2 → ... → All."""
         if self._is_live_tab() and self.query_one("#filter-input", Input).has_focus:
             return
-        projects = [p for p in self._projects if p in self._lorf_projects] if self._lorf_scope else self._projects
+        projects = [p for p in self._projects if p in self._lo_projects] if self._lo_scope else self._projects
         if not projects:
             return
         self._project_idx = (self._project_idx + 1) % (len(projects) + 1)
@@ -2311,7 +2311,7 @@ class ClaudeDashboardApp(App):
         self.project_filter = ""
         self.event_type_filter = ""
         self.compact_mode = False
-        self._lorf_scope = False
+        self._lo_scope = False
         self._project_idx = 0
         self._event_type_idx = 0
         if self._is_live_tab():
