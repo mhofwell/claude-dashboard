@@ -472,10 +472,12 @@ class ProjectTokenScanner:
                     day_bucket[model] = day_bucket.get(model, 0) + _token_total(tokens)
         return [{"date": d, "tokensByModel": m} for d, m in sorted(daily.items(), reverse=True)]
 
-    def get_global_totals(self, date_filter: set[str] | None) -> dict[str, dict[str, int]]:
+    def get_global_totals(self, date_filter: set[str] | None, project_set: set[str] | None = None) -> dict[str, dict[str, int]]:
         """Returns {model: {input, output, cache_read, cache_write, total}} across all projects."""
         result: dict[str, dict[str, int]] = {}
-        for _fp, (_proj, dates) in self._file_data.items():
+        for _fp, (proj, dates) in self._file_data.items():
+            if project_set is not None and proj not in project_set:
+                continue
             for date, models in dates.items():
                 if date_filter is not None and date not in date_filter:
                     continue
@@ -487,10 +489,12 @@ class ProjectTokenScanner:
                     result[model]["total"] += _token_total(tokens)
         return result
 
-    def get_global_daily(self, date_filter: set[str] | None) -> list[dict]:
+    def get_global_daily(self, date_filter: set[str] | None, project_set: set[str] | None = None) -> list[dict]:
         """Returns [{date, tokensByModel: {model: total}}] across all projects."""
         daily: dict[str, dict[str, int]] = {}
-        for _fp, (_proj, dates) in self._file_data.items():
+        for _fp, (proj, dates) in self._file_data.items():
+            if project_set is not None and proj not in project_set:
+                continue
             for date, models in dates.items():
                 if date_filter is not None and date not in date_filter:
                     continue
@@ -1526,8 +1530,10 @@ class ClaudeDashboardApp(App):
             self.query_one("#token-panel", Static).update(table)
             return
 
-        table = self._make_token_table(f"[bold]🪙 Tokens ({title_label})[/]")
+        scope_label = " — LORF" if self._lorf_scope else ""
+        table = self._make_token_table(f"[bold]🪙 Tokens ({title_label}{scope_label})[/]")
         date_filter = self._get_daily_token_dates()
+        lorf_set = self._lorf_projects if self._lorf_scope else None
 
         if date_filter is None:
             # All Time — use modelUsage for full breakdown with cache ratios
@@ -1542,7 +1548,7 @@ class ClaudeDashboardApp(App):
             self._add_model_rows(table, models, empty_label="[dim]Waiting...[/]")
         else:
             # Today / 7d — use JSONL scanner for accurate daily totals
-            model_totals = self._project_token_scanner.get_global_totals(date_filter)
+            model_totals = self._project_token_scanner.get_global_totals(date_filter, lorf_set)
             models = [
                 (mid, t["total"], t["cache_read"], t["output"])
                 for mid, t in model_totals.items()
