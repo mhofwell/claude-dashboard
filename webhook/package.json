@@ -1,0 +1,14 @@
+{
+  "name": "lo-content-webhook",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun --watch run index.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2",
+    "gray-matter": "^4.0.3"
+  }
+}
