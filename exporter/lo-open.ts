@@ -322,10 +322,10 @@ async function checkTelemetry(
 
 async function launchDashboard(): Promise<void> {
   try {
-    await $`open "warp://launch/claude-dashboard"`.quiet();
+    await $`open "warp://launch/claude-dash"`.quiet();
     pass("Dashboard", "Warp launch config triggered");
   } catch {
-    warn("Dashboard", "Could not launch Warp — open manually and run 'claude-dashboard'");
+    warn("Dashboard", "Could not launch Warp — open manually and run 'claude-dash'");
   }
 }
 
