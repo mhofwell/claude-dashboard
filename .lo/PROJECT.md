@@ -16,6 +16,10 @@ stack:
   - TypeScript
   - Bun
   - Supabase
+infrastructure:
+  - Supabase
+  - Bun
+  - launchd
 agents:
   - name: "claude-code"
     role: "AI coding agent (Claude Code)"
@@ -34,3 +38,9 @@ A real-time terminal dashboard and Supabase exporter for monitoring Claude Code 
 ## Architecture
 
 Single-file Python TUI (Textual/Rich) polls `~/.claude/` files at 0.5-30s intervals. TypeScript/Bun exporter reads the same files and upserts to Supabase Postgres. Both components are read-only consumers of Claude Code's native telemetry.
+
+## Infrastructure
+
+- **Supabase** — Hosted Postgres for telemetry storage and sync (via `@supabase/supabase-js`)
+- **Bun** — TypeScript runtime powering the exporter daemon
+- **launchd** — macOS service management keeping the exporter alive via plist
