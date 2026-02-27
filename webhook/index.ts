@@ -63,26 +63,23 @@ async function handleWebhook(req: Request): Promise<Response> {
 
   console.log("  .lo/ changes detected — syncing...");
 
-  const contentSlug = deriveSlugFromRepo(repoName);
+  // Parse PROJECT.md first to check for content_slug override
+  const projectRaw = await fetchFileContent(repoOwner, repoName, ".lo/PROJECT.md", GITHUB_TOKEN!);
+  const parsedProject = projectRaw ? parseProject(projectRaw) : null;
+  if (projectRaw && !parsedProject) console.warn("  PROJECT.md found but failed validation");
+  if (!projectRaw) console.warn("  No PROJECT.md found in .lo/");
+
+  const contentSlug = parsedProject?.contentSlug ?? deriveSlugFromRepo(repoName);
 
   const ctx: SyncContext = {
     contentSlug,
     repoOwner,
     repoName,
-    project: null,
+    project: parsedProject,
     hypotheses: [],
     streamEntries: [],
     researchDocs: [],
   };
-
-  // 1. PROJECT.md
-  const projectRaw = await fetchFileContent(repoOwner, repoName, ".lo/PROJECT.md", GITHUB_TOKEN!);
-  if (projectRaw) {
-    ctx.project = parseProject(projectRaw);
-    if (!ctx.project) console.warn("  PROJECT.md found but failed validation");
-  } else {
-    console.warn("  No PROJECT.md found in .lo/");
-  }
 
   // 2. hypotheses/
   const hypothesisFiles = await fetchDirectoryContents(repoOwner, repoName, ".lo/hypotheses", GITHUB_TOKEN!);

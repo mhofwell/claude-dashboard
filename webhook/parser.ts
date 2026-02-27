@@ -37,6 +37,8 @@ export function parseProject(raw: string): ParsedProject | null {
     body: content.trim(),
   };
 
+  if (data.content_slug) result.contentSlug = String(data.content_slug);
+
   if (data.repo) result.repo = String(data.repo);
   if (data.stack) result.stack = asStringArray(data.stack);
   if (data.infrastructure) result.infrastructure = asStringArray(data.infrastructure);
