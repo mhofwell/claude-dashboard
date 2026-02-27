@@ -1,7 +1,8 @@
 {
   "claude-dashboard": "claude-dashboard",
   "nexus": "nexus",
-  "looselyorganized-test-suite": "looselyorganized-test-suite",
   "looselyorganized": "looselyorganized",
-  "yellowages-for-agents": "yellowages-for-agents"
+  "agent-development-brief": "agent-development-brief",
+  "yellowages-for-agents": "yellowages-for-agents",
+  "lo-plugin": "lo-plugin"
 }
