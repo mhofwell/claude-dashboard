@@ -22,6 +22,7 @@ import {
   fail,
   warn,
   printHeader,
+  printCloseBanner,
   isProcessRunning,
   loadEnv,
 } from "./cli-output";
@@ -29,7 +30,7 @@ import {
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  printHeader("LO — Closing Research Facility");
+  printCloseBanner();
 
   const { url, key } = loadEnv();
 

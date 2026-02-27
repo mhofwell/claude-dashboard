@@ -72,6 +72,57 @@ export function printHeader(title: string): void {
   console.log();
 }
 
+// ─── LORF Banner ────────────────────────────────────────────────────────────
+
+const LORF_LINES = [
+  "██╗      ██████╗ ██████╗ ███████╗",
+  "██║     ██╔═══██╗██╔══██╗██╔════╝",
+  "██║     ██║   ██║██████╔╝█████╗  ",
+  "██║     ██║   ██║██╔══██╗██╔══╝  ",
+  "███████╗╚██████╔╝██║  ██║██║     ",
+  "╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝     ",
+];
+
+const OPEN_GRADIENT: [number, number, number][] = [
+  [80, 255, 160],
+  [60, 220, 140],
+  [45, 185, 115],
+  [35, 150, 90],
+  [25, 115, 70],
+  [15, 80, 50],
+];
+
+const CLOSE_GRADIENT: [number, number, number][] = [
+  [255, 200, 60],
+  [240, 170, 50],
+  [220, 140, 40],
+  [190, 110, 35],
+  [160, 80, 30],
+  [120, 60, 25],
+];
+
+function printBanner(gradient: [number, number, number][]): void {
+  console.log();
+  for (let i = 0; i < LORF_LINES.length; i++) {
+    const [r, g, b] = gradient[i];
+    console.log(`  \x1b[38;2;${r};${g};${b}m${BOLD}${LORF_LINES[i]}${RESET}`);
+  }
+  console.log(`  ${DIM}Loosely Organized Research Facility${RESET}`);
+  console.log();
+}
+
+export function printOpenBanner(): void {
+  printBanner(OPEN_GRADIENT);
+  console.log(`  ${DIM}Opening facility...${RESET}`);
+  console.log();
+}
+
+export function printCloseBanner(): void {
+  printBanner(CLOSE_GRADIENT);
+  console.log(`  ${DIM}Closing facility...${RESET}`);
+  console.log();
+}
+
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
 export function isProcessRunning(pid: number): boolean {

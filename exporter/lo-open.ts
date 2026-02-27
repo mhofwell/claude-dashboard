@@ -23,6 +23,7 @@ import {
   fail,
   abort,
   printHeader,
+  printOpenBanner,
   isProcessRunning,
   loadEnv,
 } from "./cli-output";
@@ -347,7 +348,7 @@ async function flipFacilityOpen(supabase: SupabaseClient): Promise<void> {
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  printHeader("LO — Opening Research Facility");
+  printOpenBanner();
 
   const { url, key } = loadEnv();
   pass("Environment", ".env loaded, credentials present");
