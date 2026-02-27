@@ -21,6 +21,7 @@ import {
   BOLD,
   pass,
   fail,
+  warn,
   abort,
   printHeader,
   printOpenBanner,
@@ -319,6 +320,15 @@ async function checkTelemetry(
   );
 }
 
+async function launchDashboard(): Promise<void> {
+  try {
+    await $`open "warp://launch/claude-dashboard"`.quiet();
+    pass("Dashboard", "Warp launch config triggered");
+  } catch {
+    warn("Dashboard", "Could not launch Warp — open manually and run 'claude-dashboard'");
+  }
+}
+
 async function flipFacilityOpen(supabase: SupabaseClient): Promise<void> {
   const { error } = await supabase
     .from("facility_status")
@@ -360,6 +370,7 @@ async function main(): Promise<void> {
   const pid = await checkExporter();
   const telemetry = await checkTelemetry(supabase);
   await flipFacilityOpen(supabase);
+  await launchDashboard();
 
   const ago = Math.round(
     (Date.now() - new Date(telemetry.updatedAt).getTime()) / 1000
