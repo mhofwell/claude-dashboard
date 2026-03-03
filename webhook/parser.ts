@@ -15,15 +15,15 @@ function asStringArray(val: unknown): string[] {
 export function parseProject(raw: string): ParsedProject | null {
   const { data, content } = matter(raw);
 
-  if (!data.title || !data.description || !data.status || !data.classification || !data.topics) {
+  if (!data.title || !data.description || !data.status || !data.state || !data.topics) {
     return null;
   }
 
   const validStatuses = ["explore", "build", "open", "closed"];
   if (!validStatuses.includes(data.status)) return null;
 
-  const validClassifications = ["public", "private"];
-  if (!validClassifications.includes(data.classification)) return null;
+  const validStates = ["public", "private"];
+  if (!validStates.includes(data.state)) return null;
 
   const topics = asStringArray(data.topics);
   if (topics.length === 0) return null;
@@ -32,7 +32,7 @@ export function parseProject(raw: string): ParsedProject | null {
     title: String(data.title),
     description: String(data.description),
     status: data.status,
-    classification: data.classification,
+    state: data.state,
     topics,
     body: content.trim(),
   };

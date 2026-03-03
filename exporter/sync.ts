@@ -61,7 +61,7 @@ export async function upsertProject(
       {
         content_slug: slug,
         visibility: visibility === "public" ? "public" : "private",
-        classification: visibility === "public" ? "public" : "private",
+        state: visibility === "public" ? "public" : "private",
         status: "explore",
         first_seen: now.toISOString(),
         last_active: now.toISOString(),

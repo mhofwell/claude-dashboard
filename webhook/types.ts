@@ -31,7 +31,7 @@ export interface ParsedProject {
   title: string;
   description: string;
   status: "explore" | "build" | "open" | "closed";
-  classification: "public" | "private";
+  state: "public" | "private";
   topics: string[];
   contentSlug?: string;
   repo?: string;

@@ -105,7 +105,7 @@ CREATE TABLE projects (
   last_active TIMESTAMPTZ NOT NULL DEFAULT now(),
   total_events INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'idea',
-  classification TEXT NOT NULL DEFAULT 'classified',
+  state TEXT NOT NULL DEFAULT 'private',
   content_slug TEXT UNIQUE
 );
 

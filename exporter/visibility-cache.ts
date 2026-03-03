@@ -7,7 +7,7 @@ import { execSync } from "child_process";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 
-type Visibility = "public" | "classified";
+type Visibility = "public" | "private";
 
 const CACHE_FILE = join(
   dirname(new URL(import.meta.url).pathname),
@@ -60,7 +60,7 @@ function ensureGhRepoMap(): void {
     console.log(`  Loaded ${Object.keys(ghRepoMap).length} repos from GitHub`);
   } catch {
     console.warn(
-      "  Warning: Could not fetch GitHub repos. Defaulting to classified."
+      "  Warning: Could not fetch GitHub repos. Defaulting to private."
     );
   }
 }
@@ -76,7 +76,7 @@ export function getVisibility(projectName: string): Visibility {
   ensureGhRepoMap();
 
   const isPublic = ghRepoMap![projectName] === false;
-  const visibility: Visibility = isPublic ? "public" : "classified";
+  const visibility: Visibility = isPublic ? "public" : "private";
 
   cache[projectName] = visibility;
   saveCache();

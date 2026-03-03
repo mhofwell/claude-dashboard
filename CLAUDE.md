@@ -82,7 +82,7 @@ TypeScript/Bun daemon that reads the same `~/.claude/` files and pushes telemetr
 | `parsers.ts` | Log line parsing, timestamp parsing, LogTailer, stats file readers |
 | `process-scanner.ts` | Detects running Claude processes via `ps`/`lsof` |
 | `project-scanner.ts` | Scans JSONL conversation files for per-project token breakdowns |
-| `visibility-cache.ts` | Maps project names to public/classified visibility |
+| `visibility-cache.ts` | Maps project names to public/private visibility |
 
 ### Supabase Tables
 

@@ -2,7 +2,7 @@
 title: "Claude Dashboard"
 description: "Real-time terminal dashboard and Supabase exporter for monitoring Claude Code activity."
 status: "explore"
-classification: "public"
+state: "public"
 topics:
   - developer-tools
   - telemetry

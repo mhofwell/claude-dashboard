@@ -12,7 +12,7 @@ describe("parseProject", () => {
 title: "Test Project"
 description: "A test project"
 status: "build"
-classification: "public"
+state: "public"
 topics: [ai, testing]
 repo: "https://github.com/org/test"
 stack: [Bun, TypeScript]
@@ -49,7 +49,7 @@ body`;
 title: "Minimal"
 description: "Minimal project"
 status: "explore"
-classification: "private"
+state: "private"
 topics: [test]
 ---
 body`;

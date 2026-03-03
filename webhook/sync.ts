@@ -28,7 +28,7 @@ export async function syncProjectContent(ctx: SyncContext): Promise<{ ok: boolea
           title: ctx.project.title,
           description: ctx.project.description,
           status: ctx.project.status,
-          classification: ctx.project.classification,
+          state: ctx.project.state,
           topics: ctx.project.topics,
           repo_url: ctx.project.repo ?? null,
           repo_owner: owner ?? ctx.repoOwner,
