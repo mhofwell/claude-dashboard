@@ -44,7 +44,7 @@ export interface ProcessDiff {
 }
 
 interface SnapshotEntry {
-  slug: string;
+  projId: string;
   isActive: boolean;
 }
 
@@ -100,7 +100,7 @@ export class ProcessWatcher {
 
     const current = new Map<number, SnapshotEntry>();
     for (const proc of state.processes) {
-      current.set(proc.pid, { slug: proc.slug, isActive: proc.isActive });
+      current.set(proc.pid, { projId: proc.projId, isActive: proc.isActive });
     }
 
     const events: ProcessEvent[] = [];
@@ -112,16 +112,16 @@ export class ProcessWatcher {
       const wasReportedActive = this.reportedActive.get(pid) ?? false;
 
       if (!this.previous.has(pid)) {
-        events.push({ type: "instance:created", project: entry.slug, pid });
+        events.push({ type: "instance:created", project: entry.projId, pid });
         if (windowActive) {
-          events.push({ type: "instance:active", project: entry.slug, pid });
+          events.push({ type: "instance:active", project: entry.projId, pid });
         }
         this.reportedActive.set(pid, windowActive);
       } else if (windowActive && !wasReportedActive) {
-        events.push({ type: "instance:active", project: entry.slug, pid });
+        events.push({ type: "instance:active", project: entry.projId, pid });
         this.reportedActive.set(pid, true);
       } else if (!windowActive && wasReportedActive) {
-        events.push({ type: "instance:idle", project: entry.slug, pid });
+        events.push({ type: "instance:idle", project: entry.projId, pid });
         this.reportedActive.set(pid, false);
       }
     }
@@ -129,7 +129,7 @@ export class ProcessWatcher {
     // Detect closed PIDs
     for (const [pid, prev] of this.previous) {
       if (!current.has(pid)) {
-        events.push({ type: "instance:closed", project: prev.slug, pid });
+        events.push({ type: "instance:closed", project: prev.projId, pid });
         this.activityWindow.delete(pid);
         this.reportedActive.delete(pid);
       }
@@ -140,34 +140,34 @@ export class ProcessWatcher {
     if (events.length === 0) return null;
 
     // Compute per-project totals for affected projects using windowed active state
-    const affectedSlugs = new Set(
+    const affectedProjIds = new Set(
       events.map((e) => e.project).filter((s) => s !== "unknown")
     );
 
     const byProject = new Map<string, ProjectAgentState>();
-    for (const slug of affectedSlugs) {
+    for (const projId of affectedProjIds) {
       let count = 0;
       let active = 0;
       for (const proc of state.processes) {
-        if (proc.slug !== slug) continue;
+        if (proc.projId !== projId) continue;
         count++;
         if (this.isWindowActive(proc.pid)) active++;
       }
-      byProject.set(slug, { active, count });
+      byProject.set(projId, { active, count });
     }
 
     // Facility-level counts also use windowed state
     const activeProcessPids = state.processes.filter((p) =>
       this.isWindowActive(p.pid)
     );
-    const activePidSlugs = new Set(activeProcessPids.map((p) => p.slug));
+    const activePidProjIds = new Set(activeProcessPids.map((p) => p.projId));
 
-    const uniqueSlugs = new Set(
-      state.processes.map((p) => p.slug).filter((s) => s !== "unknown")
+    const uniqueProjIds = new Set(
+      state.processes.map((p) => p.projId).filter((s) => s !== "unknown")
     );
-    const activeProjects = [...uniqueSlugs].map((slug) => ({
-      name: slug,
-      active: activePidSlugs.has(slug),
+    const activeProjects = [...uniqueProjIds].map((projId) => ({
+      name: projId,
+      active: activePidProjIds.has(projId),
     }));
 
     return {
