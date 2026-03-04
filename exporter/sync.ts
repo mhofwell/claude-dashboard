@@ -45,11 +45,12 @@ export function getSupabase(): SupabaseClient {
 
 /**
  * Ensure a project exists in the projects table.
- * Upserts on content_slug (canonical PK). Tracks local directory names
+ * Upserts on proj_id (canonical PK). Tracks local directory names
  * in the local_names array.
  */
 export async function upsertProject(
-  slug: string,
+  projId: string,
+  contentSlug: string,
   localName: string,
   visibility: "public" | "classified",
   timestamp?: Date
@@ -59,7 +60,8 @@ export async function upsertProject(
     .from("projects")
     .upsert(
       {
-        content_slug: slug,
+        proj_id: projId,
+        content_slug: contentSlug,
         visibility: visibility === "public" ? "public" : "private",
         state: visibility === "public" ? "public" : "private",
         status: "explore",
@@ -67,7 +69,7 @@ export async function upsertProject(
         last_active: now.toISOString(),
         local_names: [],
       },
-      { onConflict: "content_slug", ignoreDuplicates: false }
+      { onConflict: "proj_id", ignoreDuplicates: false }
     )
     .select("local_names")
     .single();
@@ -79,23 +81,23 @@ export async function upsertProject(
     const { data: fallback, error: updateError } = await supabase
       .from("projects")
       .update({ last_active: now.toISOString(), visibility })
-      .eq("content_slug", slug)
+      .eq("proj_id", projId)
       .select("local_names")
       .single();
     if (updateError) {
-      console.error(`  Failed to register project ${slug}:`, error.message);
+      console.error(`  Failed to register project ${projId}:`, error.message);
       return;
     }
     localNames = fallback?.local_names as string[] ?? null;
   }
 
   // Merge localName into local_names if it's not already present
-  if (localName && localName !== slug && localNames) {
+  if (localName && localName !== contentSlug && localNames) {
     if (!localNames.includes(localName)) {
       await supabase
         .from("projects")
         .update({ local_names: [...localNames, localName] })
-        .eq("content_slug", slug);
+        .eq("proj_id", projId);
     }
   }
 }
@@ -104,14 +106,14 @@ export async function upsertProject(
  * Update a project's event count and last_active time.
  */
 export async function updateProjectActivity(
-  slug: string,
+  projId: string,
   eventCount: number,
   lastActive: Date
 ): Promise<void> {
   const { data: current } = await supabase
     .from("projects")
     .select("total_events")
-    .eq("content_slug", slug)
+    .eq("proj_id", projId)
     .single();
 
   if (current) {
@@ -121,7 +123,7 @@ export async function updateProjectActivity(
         total_events: current.total_events + eventCount,
         last_active: lastActive.toISOString(),
       })
-      .eq("content_slug", slug);
+      .eq("proj_id", projId);
   }
 }
 
@@ -148,6 +150,7 @@ export async function insertEvents(entries: LogEntry[]): Promise<InsertEventsRes
     .map((e) => ({
       timestamp: e.parsedTimestamp!.toISOString(),
       project: e.project,
+      proj_id: e.project,
       branch: e.branch || null,
       emoji: e.emoji || null,
       event_type: e.eventType,
@@ -318,7 +321,7 @@ export async function syncProjectDailyMetrics(
     const { data: existingRows } = await supabase
       .from("daily_metrics")
       .select("id, date, project")
-      .in("project", projectBatch)
+      .in("proj_id", projectBatch)
       .in("date", dates);
 
     for (const row of existingRows ?? []) {
@@ -330,6 +333,7 @@ export async function syncProjectDailyMetrics(
   interface ProjectDailyMetricsInsert {
     date: string;
     project: string;
+    proj_id: string;
     tokens: Record<string, number> | null;
     sessions: number;
     messages: number;
@@ -369,6 +373,7 @@ export async function syncProjectDailyMetrics(
       toInsert.push({
         date: row.date,
         project: row.project,
+        proj_id: row.project,
         tokens: row.tokens ?? null,
         sessions: row.events?.sessions ?? 0,
         messages: row.events?.messages ?? 0,
@@ -488,7 +493,7 @@ export async function updateFacilityMetrics(update: FacilityMetricsUpdate): Prom
 // ─── Project Telemetry ──────────────────────────────────────────────────────
 
 export interface ProjectTelemetryUpdate {
-  project: string;
+  projId: string;
   tokensLifetime: number;
   tokensToday: number;
   modelsToday: Record<string, number>;
@@ -502,6 +507,7 @@ export interface ProjectTelemetryUpdate {
 }
 
 interface ProjectTelemetryRow {
+  proj_id: string;
   project: string;
   tokens_lifetime: number;
   tokens_today: number;
@@ -526,7 +532,8 @@ export async function batchUpsertProjectTelemetry(
 
   function toRow(u: ProjectTelemetryUpdate): ProjectTelemetryRow {
     const row: ProjectTelemetryRow = {
-      project: u.project,
+      proj_id: u.projId,
+      project: u.projId,
       tokens_lifetime: u.tokensLifetime,
       tokens_today: u.tokensToday,
       models_today: u.modelsToday,
@@ -546,14 +553,14 @@ export async function batchUpsertProjectTelemetry(
 
   console.log(
     `  project_telemetry: writing ${updates.length} rows —`,
-    updates.map((u) => `${u.project}: ${formatTokens(u.tokensLifetime)}`).join(", ")
+    updates.map((u) => `${u.projId}: ${formatTokens(u.tokensLifetime)}`).join(", ")
   );
 
   // Try batch upsert first (fast path)
   const rows = updates.map(toRow);
   const { error } = await supabase
     .from("project_telemetry")
-    .upsert(rows, { onConflict: "project" });
+    .upsert(rows, { onConflict: "proj_id" });
 
   if (error) {
     // Batch failed (likely FK violation) -- fall back to per-row upserts
@@ -562,9 +569,9 @@ export async function batchUpsertProjectTelemetry(
     for (const update of updates) {
       const { error: rowError } = await supabase
         .from("project_telemetry")
-        .upsert(toRow(update), { onConflict: "project" });
+        .upsert(toRow(update), { onConflict: "proj_id" });
       if (rowError) {
-        console.error(`  project_telemetry: skipping ${update.project} (${rowError.message})`);
+        console.error(`  project_telemetry: skipping ${update.projId} (${rowError.message})`);
       } else {
         succeeded++;
       }
@@ -582,18 +589,18 @@ export async function batchUpsertProjectTelemetry(
 async function verifyProjectTelemetry(updates: ProjectTelemetryUpdate[]): Promise<void> {
   const { data: rows } = await supabase
     .from("project_telemetry")
-    .select("project, tokens_lifetime");
+    .select("proj_id, tokens_lifetime");
 
   if (!rows) return;
 
-  const dbValues = new Map(rows.map((r) => [r.project as string, Number(r.tokens_lifetime)]));
+  const dbValues = new Map(rows.map((r) => [r.proj_id as string, Number(r.tokens_lifetime)]));
   let mismatches = 0;
 
   for (const u of updates) {
-    const dbVal = dbValues.get(u.project);
+    const dbVal = dbValues.get(u.projId);
     if (dbVal !== undefined && dbVal !== u.tokensLifetime) {
       console.error(
-        `  project_telemetry MISMATCH: ${u.project} — wrote ${formatTokens(u.tokensLifetime)} but DB has ${formatTokens(dbVal)}`
+        `  project_telemetry MISMATCH: ${u.projId} — wrote ${formatTokens(u.tokensLifetime)} but DB has ${formatTokens(dbVal)}`
       );
       mismatches++;
     }
@@ -658,11 +665,11 @@ export async function pruneOldEvents(retentionDays = 14): Promise<number> {
 export async function pushAgentState(diff: ProcessDiff): Promise<void> {
   const now = new Date().toISOString();
 
-  const projectWrites = [...diff.byProject.entries()].map(([slug, counts]) =>
+  const projectWrites = [...diff.byProject.entries()].map(([projId, counts]) =>
     supabase
       .from("project_telemetry")
       .update({ active_agents: counts.active, agent_count: counts.count, updated_at: now })
-      .eq("project", slug)
+      .eq("proj_id", projId)
   );
 
   // Facility agent fields only -- status is owned by the manual switch (lo-open/lo-close)
@@ -673,8 +680,8 @@ export async function pushAgentState(diff: ProcessDiff): Promise<void> {
 
   const activityWrites = [...diff.byProject.entries()]
     .filter(([, counts]) => counts.active > 0)
-    .map(([slug]) =>
-      supabase.from("projects").update({ last_active: now }).eq("content_slug", slug)
+    .map(([projId]) =>
+      supabase.from("projects").update({ last_active: now }).eq("proj_id", projId)
     );
 
   const results = await Promise.all([...projectWrites, facilityWrite, ...activityWrites]);
