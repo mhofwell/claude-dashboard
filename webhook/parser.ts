@@ -3,7 +3,6 @@ import type {
   ParsedProject,
   ParsedHypothesis,
   ParsedStreamEntry,
-  ParsedResearchDoc,
 } from "./types";
 
 function asStringArray(val: unknown): string[] {
@@ -96,22 +95,3 @@ export function parseStreamEntry(
   };
 }
 
-export function parseResearchDoc(
-  raw: string,
-  filename: string
-): ParsedResearchDoc | null {
-  const { data, content } = matter(raw);
-
-  if (!data.title || !data.date || !data.topics || !data.status) return null;
-
-  const slug = filename.replace(/\.md$/, "");
-
-  return {
-    slug,
-    title: String(data.title),
-    date: String(data.date),
-    topics: asStringArray(data.topics),
-    status: data.status,
-    body: content.trim(),
-  };
-}

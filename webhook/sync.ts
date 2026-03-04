@@ -117,38 +117,6 @@ export async function syncProjectContent(ctx: SyncContext): Promise<{ ok: boolea
       console.log(`  project_stream: synced ${ctx.streamEntries.length} entries`);
     }
 
-    // 4. Sync research docs (upsert + delete removed)
-    if (ctx.researchDocs.length > 0 || ctx.project) {
-      const incomingSlugs = ctx.researchDocs.map((d) => d.slug);
-
-      for (const doc of ctx.researchDocs) {
-        const { error } = await supabase.from("research_docs").upsert(
-          {
-            content_slug: ctx.contentSlug,
-            slug: doc.slug,
-            title: doc.title,
-            date: doc.date,
-            topics: doc.topics,
-            status: doc.status,
-            body: doc.body,
-          },
-          { onConflict: "content_slug,slug" }
-        );
-        if (error) console.warn(`  research/${doc.slug}: ${error.message}`);
-      }
-
-      if (incomingSlugs.length > 0) {
-        await supabase
-          .from("research_docs")
-          .delete()
-          .eq("content_slug", ctx.contentSlug)
-          .not("slug", "in", `(${incomingSlugs.map((s) => `"${s}"`).join(",")})`);
-      } else {
-        await supabase.from("research_docs").delete().eq("content_slug", ctx.contentSlug);
-      }
-      console.log(`  research_docs: synced ${ctx.researchDocs.length} entries`);
-    }
-
     return { ok: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

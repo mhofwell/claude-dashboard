@@ -6,7 +6,7 @@
  */
 
 import { fetchFileContent, fetchDirectoryContents, fetchContributors, deriveSlugFromRepo } from "./github";
-import { parseProject, parseHypothesis, parseStreamEntry, parseResearchDoc } from "./parser";
+import { parseProject, parseHypothesis, parseStreamEntry } from "./parser";
 import { initSupabase, syncProjectContent, syncContributors } from "./sync";
 import type { SyncContext } from "./types";
 
@@ -41,7 +41,6 @@ async function syncRepo(owner: string, name: string): Promise<void> {
     project: null,
     hypotheses: [],
     streamEntries: [],
-    researchDocs: [],
   };
 
   // PROJECT.md
@@ -69,16 +68,6 @@ async function syncRepo(owner: string, name: string): Promise<void> {
     if (!raw) continue;
     const parsed = parseStreamEntry(raw, f.name);
     if (parsed) ctx.streamEntries.push(parsed);
-  }
-
-  // research/
-  const rFiles = await fetchDirectoryContents(owner, name, ".lo/research", GITHUB_TOKEN!);
-  for (const f of rFiles) {
-    if (f.type !== "file" || !f.name.endsWith(".md") || f.name === ".gitkeep") continue;
-    const raw = await fetchFileContent(owner, name, f.path, GITHUB_TOKEN!);
-    if (!raw) continue;
-    const parsed = parseResearchDoc(raw, f.name);
-    if (parsed) ctx.researchDocs.push(parsed);
   }
 
   const result = await syncProjectContent(ctx);

@@ -3,7 +3,6 @@ import {
   parseProject,
   parseHypothesis,
   parseStreamEntry,
-  parseResearchDoc,
 } from "./parser";
 
 describe("parseProject", () => {
@@ -103,22 +102,3 @@ First working prototype.`;
   });
 });
 
-describe("parseResearchDoc", () => {
-  it("parses valid research doc", () => {
-    const content = `---
-title: "Distributed Locking"
-date: "2026-02-19"
-topics: [distributed-systems, redis]
-status: "published"
----
-
-## Introduction
-
-Research content here.`;
-
-    const result = parseResearchDoc(content, "distributed-locking.md");
-    expect(result).not.toBeNull();
-    expect(result!.slug).toBe("distributed-locking");
-    expect(result!.topics).toEqual(["distributed-systems", "redis"]);
-  });
-});

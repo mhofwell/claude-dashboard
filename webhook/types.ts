@@ -59,15 +59,6 @@ export interface ParsedStreamEntry {
   body: string;
 }
 
-export interface ParsedResearchDoc {
-  slug: string;
-  title: string;
-  date: string;
-  topics: string[];
-  status: "draft" | "review" | "published";
-  body: string;
-}
-
 // ─── Sync context ────────────────────────────────────────────────────────────
 
 export interface SyncContext {
@@ -77,5 +68,4 @@ export interface SyncContext {
   project: ParsedProject | null;
   hypotheses: ParsedHypothesis[];
   streamEntries: ParsedStreamEntry[];
-  researchDocs: ParsedResearchDoc[];
 }

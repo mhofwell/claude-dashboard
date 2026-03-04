@@ -1,6 +1,6 @@
 import { verifySignature } from "./verify";
 import { touchesLoDir, deriveSlugFromRepo, fetchFileContent, fetchDirectoryContents, fetchContributors } from "./github";
-import { parseProject, parseHypothesis, parseStreamEntry, parseResearchDoc } from "./parser";
+import { parseProject, parseHypothesis, parseStreamEntry } from "./parser";
 import { initSupabase, syncProjectContent, syncContributors } from "./sync";
 import type { GitHubPushPayload, SyncContext } from "./types";
 
@@ -78,7 +78,6 @@ async function handleWebhook(req: Request): Promise<Response> {
     project: parsedProject,
     hypotheses: [],
     streamEntries: [],
-    researchDocs: [],
   };
 
   // 2. hypotheses/
@@ -101,17 +100,6 @@ async function handleWebhook(req: Request): Promise<Response> {
     const parsed = parseStreamEntry(raw, entry.name);
     if (parsed) ctx.streamEntries.push(parsed);
     else console.warn(`  Skipping invalid stream entry: ${entry.name}`);
-  }
-
-  // 4. research/
-  const researchFiles = await fetchDirectoryContents(repoOwner, repoName, ".lo/research", GITHUB_TOKEN!);
-  for (const entry of researchFiles) {
-    if (entry.type !== "file" || !entry.name.endsWith(".md") || entry.name === ".gitkeep") continue;
-    const raw = await fetchFileContent(repoOwner, repoName, entry.path, GITHUB_TOKEN!);
-    if (!raw) continue;
-    const parsed = parseResearchDoc(raw, entry.name);
-    if (parsed) ctx.researchDocs.push(parsed);
-    else console.warn(`  Skipping invalid research doc: ${entry.name}`);
   }
 
   // Sync to Supabase
