@@ -14,17 +14,18 @@ import { readdirSync, readFileSync, statSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
-import { resolveSlug } from "./slug-resolver";
+import { resolveProjId, loadLegacyMapping } from "./slug-resolver";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
-const PROJECT_ROOT = "/Users/bigviking/Documents/github/projects/looselyorganized";
-const CANONICAL_ENCODED_ROOT = PROJECT_ROOT.replace(/\//g, "-");
+const PROJECT_ROOT = "/Users/bigviking/Documents/github/projects/lo";
+const LEGACY_ROOT = "/Users/bigviking/Documents/github/projects/looselyorganized";
+const ENCODED_ROOTS = [PROJECT_ROOT, LEGACY_ROOT].map((r) => r.replace(/\//g, "-"));
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-/** project -> date -> { model: totalTokens } */
+/** proj_id -> date -> { model: totalTokens } */
 export type ProjectTokenMap = Map<string, Map<string, Record<string, number>>>;
 
 interface JsonlFile {
@@ -74,24 +75,43 @@ function getOrCreate<K, V>(map: Map<K, V>, key: K, defaultValue: () => V): V {
  */
 export function resolveProjectName(encodedDirName: string): string | null {
   const lowerEncoded = encodedDirName.toLowerCase();
-  const lowerRoot = CANONICAL_ENCODED_ROOT.toLowerCase();
 
-  if (!lowerEncoded.startsWith(lowerRoot + "-")) {
-    return null;
-  }
+  for (const encodedRoot of ENCODED_ROOTS) {
+    const lowerRoot = encodedRoot.toLowerCase();
+    if (!lowerEncoded.startsWith(lowerRoot + "-")) continue;
 
-  const lowerRemainder = encodedDirName
-    .slice(CANONICAL_ENCODED_ROOT.length + 1)
-    .toLowerCase();
+    const lowerRemainder = encodedDirName
+      .slice(encodedRoot.length + 1)
+      .toLowerCase();
 
-  for (const dir of readProjectDirs()) {
-    const lowerDir = dir.toLowerCase();
-    if (lowerRemainder === lowerDir || lowerRemainder.startsWith(lowerDir + "-")) {
-      return dir;
+    for (const dir of readProjectDirs()) {
+      const lowerDir = dir.toLowerCase();
+      if (lowerRemainder === lowerDir || lowerRemainder.startsWith(lowerDir + "-")) {
+        return dir;
+      }
     }
   }
 
   return null;
+}
+
+/**
+ * Resolve an encoded ~/.claude/projects/ directory name to a proj_id.
+ *
+ * Two-step resolution:
+ * 1. Live repos: resolveProjectName() → resolveProjId() from .lo/PROJECT.md
+ * 2. Legacy/orphan dirs: falls back to static .project-mapping.json
+ */
+export function resolveProjIdForDir(encodedDirName: string): string | null {
+  // Try live repo path first
+  const projectName = resolveProjectName(encodedDirName);
+  if (projectName) {
+    const projId = resolveProjId(join(PROJECT_ROOT, projectName));
+    if (projId) return projId;
+  }
+
+  // Fall back to legacy mapping for orphan/renamed directories
+  return loadLegacyMapping().get(encodedDirName) ?? null;
 }
 
 // ─── JSONL file discovery ───────────────────────────────────────────────────
@@ -145,7 +165,7 @@ function discoverJsonlFiles(dirPath: string): JsonlFile[] {
  */
 function extractUsageRecords(
   filePath: string,
-  projectSlug: string,
+  projId: string,
   result: ProjectTokenMap
 ): number {
   const content = readFileSync(filePath, "utf-8");
@@ -184,7 +204,7 @@ function extractUsageRecords(
     if (tokens === 0) continue;
 
     const date = timestamp.substring(0, 10);
-    const dateMap = getOrCreate(result, projectSlug, () => new Map());
+    const dateMap = getOrCreate(result, projId, () => new Map());
     const modelMap = getOrCreate(dateMap, date, () => ({}));
     modelMap[model] = (modelMap[model] ?? 0) + tokens;
 
@@ -217,22 +237,19 @@ export function scanProjectTokens(): ProjectTokenMap {
   let skippedDirs = 0;
   let dedupedFiles = 0;
 
-  const seenFilesBySlug = new Map<string, Set<string>>();
+  const seenFilesByProjId = new Map<string, Set<string>>();
 
   for (const dirName of projectDirs) {
     const dirPath = join(PROJECTS_DIR, dirName);
     if (!isDirectory(dirPath)) continue;
 
-    const projectName = resolveProjectName(dirName);
-    if (!projectName) {
+    const projId = resolveProjIdForDir(dirName);
+    if (!projId) {
       skippedDirs++;
       continue;
     }
 
-    const projectSlug = resolveSlug(join(PROJECT_ROOT, projectName));
-    if (!projectSlug) continue;
-
-    const seenFiles = getOrCreate(seenFilesBySlug, projectSlug, () => new Set());
+    const seenFiles = getOrCreate(seenFilesByProjId, projId, () => new Set());
     const filePaths = discoverJsonlFiles(dirPath);
 
     for (const { fullPath, dedupKey } of filePaths) {
@@ -244,7 +261,7 @@ export function scanProjectTokens(): ProjectTokenMap {
       totalFiles++;
 
       try {
-        totalRecords += extractUsageRecords(fullPath, projectSlug, result);
+        totalRecords += extractUsageRecords(fullPath, projId, result);
       } catch {
         skippedFiles++;
       }
@@ -262,7 +279,7 @@ export function scanProjectTokens(): ProjectTokenMap {
 
 // ─── Per-project lifetime totals ────────────────────────────────────────────
 
-/** Compute total lifetime tokens per project from the token map. */
+/** Compute total lifetime tokens per project (keyed by proj_id) from the token map. */
 export function computeTokensByProject(
   tokenMap: ProjectTokenMap
 ): Record<string, number> {

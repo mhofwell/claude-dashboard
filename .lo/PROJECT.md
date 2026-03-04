@@ -1,4 +1,5 @@
 ---
+proj_id: "proj_ab98181f-8898-4189-bd2c-0843a7c7fafe"
 title: "Claude Dashboard"
 description: "Real-time terminal dashboard and Supabase exporter for monitoring Claude Code activity."
 status: "explore"

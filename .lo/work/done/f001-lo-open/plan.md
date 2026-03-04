@@ -1,3 +1,8 @@
+---
+feature: f001
+status: done
+---
+
 # lo-open Startup Command Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.

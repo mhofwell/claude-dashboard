@@ -1,3 +1,8 @@
+---
+feature: f002
+status: done
+---
+
 # LO Scope Toggle
 
 ## Summary

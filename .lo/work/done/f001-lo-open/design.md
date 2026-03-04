@@ -1,7 +1,11 @@
+---
+feature: f001
+status: done
+---
+
 # lo-open Startup Command Design
 
 **Date**: 2026-02-25
-**Status**: Approved
 **Scope**: claude-dashboard/exporter
 
 ## Problem

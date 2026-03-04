@@ -1,18 +1,24 @@
 /**
  * Slug resolver for the LO telemetry exporter.
  *
- * Maps project directory paths to their content_slug by reading
- * .lo/project.md frontmatter. Only LO projects (those with .lo/)
+ * Maps project directory paths to their content_slug and proj_id by reading
+ * .lo/PROJECT.md frontmatter. Only LO projects (those with .lo/)
  * are tracked — all others are silently ignored.
+ *
+ * Two resolution strategies:
+ * 1. Live repos: reads .lo/PROJECT.md (or legacy .lo/project.md) for proj_id
+ * 2. Legacy/orphan dirs: static mapping in .project-mapping.json (encoded path → proj_id)
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
-import { basename, join } from "path";
+import { basename, dirname, join } from "path";
 
 const PROJECT_ROOT =
-  "/Users/bigviking/Documents/github/projects/looselyorganized";
+  "/Users/bigviking/Documents/github/projects/lo";
 
 const slugCache = new Map<string, string | null>();
+const projIdCache = new Map<string, string | null>();
+let legacyMappingCache: Map<string, string> | null = null;
 
 /** Minimal YAML frontmatter parser — extracts key: value pairs between --- fences. */
 function parseFrontmatter(content: string): Record<string, string> {
@@ -55,11 +61,14 @@ export function resolveSlug(projectDir: string): string | null {
   let slug = basename(projectDir);
 
   try {
-    const content = readFileSync(join(loDir, "project.md"), "utf-8");
+    const projectMdPath = existsSync(join(loDir, "PROJECT.md"))
+      ? join(loDir, "PROJECT.md")
+      : join(loDir, "project.md");
+    const content = readFileSync(projectMdPath, "utf-8");
     const fm = parseFrontmatter(content);
     slug = fm.content_slug ?? fm.slug ?? slug;
   } catch {
-    // .lo/ exists but no project.md — use directory basename
+    // .lo/ exists but no PROJECT.md or project.md — use directory basename
   }
 
   slugCache.set(projectDir, slug);
@@ -96,4 +105,89 @@ export function buildSlugMap(): Map<string, string> {
  */
 export function clearSlugCache(): void {
   slugCache.clear();
+}
+
+// ---------------------------------------------------------------------------
+// proj_id resolution (stable UUIDs — replaces slug-based identification)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a project directory path to its proj_id.
+ * Reads .lo/PROJECT.md (or legacy .lo/project.md) frontmatter for the proj_id field.
+ * Returns null if the project has no .lo/ directory or no proj_id in frontmatter.
+ */
+export function resolveProjId(projectDir: string): string | null {
+  if (projIdCache.has(projectDir)) return projIdCache.get(projectDir)!;
+
+  const loDir = join(projectDir, ".lo");
+  if (!existsSync(loDir)) {
+    projIdCache.set(projectDir, null);
+    return null;
+  }
+
+  let projId: string | null = null;
+
+  try {
+    const projectMdPath = existsSync(join(loDir, "PROJECT.md"))
+      ? join(loDir, "PROJECT.md")
+      : join(loDir, "project.md");
+    const content = readFileSync(projectMdPath, "utf-8");
+    const fm = parseFrontmatter(content);
+    projId = fm.proj_id ?? null;
+  } catch {
+    // .lo/ exists but no PROJECT.md or project.md — no proj_id available
+  }
+
+  projIdCache.set(projectDir, projId);
+  return projId;
+}
+
+/**
+ * Resolve a project directory path to its content_slug.
+ * Convenience alias for resolveSlug() — named explicitly to distinguish
+ * from proj_id resolution during the migration period.
+ */
+export function resolveContentSlug(projectDir: string): string | null {
+  return resolveSlug(projectDir);
+}
+
+/**
+ * Load the static legacy mapping from .project-mapping.json.
+ * Returns a Map of encoded JSONL directory names → proj_id values
+ * for directories that no longer exist on disk (old looselyorganized paths).
+ *
+ * The mapping is loaded once and cached for the lifetime of the process.
+ */
+export function loadLegacyMapping(): Map<string, string> {
+  if (legacyMappingCache) return legacyMappingCache;
+
+  legacyMappingCache = new Map<string, string>();
+
+  try {
+    const mappingPath = join(
+      dirname(new URL(import.meta.url).pathname),
+      ".project-mapping.json"
+    );
+    const raw = JSON.parse(readFileSync(mappingPath, "utf-8"));
+
+    for (const [key, value] of Object.entries(raw)) {
+      if (key === "_comment") continue;
+      if (typeof value === "string") {
+        legacyMappingCache.set(key, value);
+      }
+    }
+  } catch {
+    // .project-mapping.json not found or malformed — return empty map
+  }
+
+  return legacyMappingCache;
+}
+
+/**
+ * Clear the in-memory proj_id and legacy mapping caches.
+ * Call before refreshing proj_id resolution.
+ */
+export function clearProjIdCache(): void {
+  projIdCache.clear();
+  legacyMappingCache = null;
 }
